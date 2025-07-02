@@ -491,7 +491,7 @@ def main():
     dm = DataModule(args)
 
     callbacks = []
-    ckl_suffix = f"-ckl-n-{args.num_kernels}-m-{args.margin}" if args.contrastive_kernel_loss else ""
+    ckl_suffix = f"-ckl-n-{args.num_kernels}-m-{args.margin}-a-{args.alpha}" if args.contrastive_kernel_loss else ""
     ModelCheckpoint.CHECKPOINT_NAME_LAST = (
         f"{args.model}-{args.dataset}"
         + ckl_suffix
