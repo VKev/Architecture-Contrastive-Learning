@@ -327,18 +327,15 @@ class Model(pl.LightningModule):
         # 1) Classification loss
         cls_loss = self.cls_criterion(logits, y)
 
-        # 2) (Optional) Contrastive kernel loss
-        if self.hparams["contrastive_kernel_loss"]:
-            kernel_list = self._get_kernel_list()
-            if self.hparams["mode"].lower() == "random-sampling":
-                kernel_list = self._select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
-            kernel_loss = (
-                self.kernel_loss_fn(kernel_list)
-                if kernel_list
-                else torch.tensor(0.0, device=self.device)
-            )
-        else:
-            kernel_loss = torch.tensor(0.0, device=self.device)
+        # 2) Always compute contrastive kernel loss for monitoring
+        kernel_list = self._get_kernel_list()
+        if self.hparams["mode"].lower() == "random-sampling":
+            kernel_list = self._select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
+        kernel_loss = (
+            self.kernel_loss_fn(kernel_list)
+            if kernel_list
+            else torch.tensor(0.0, device=self.device)
+        )
 
         total_loss = cls_loss
         if self.hparams["contrastive_kernel_loss"]:
@@ -350,10 +347,8 @@ class Model(pl.LightningModule):
 
         self.log("train/loss", total_loss, on_step=True, on_epoch=True, prog_bar=False)
         self.log("train/acc", acc, on_step=True, on_epoch=True, prog_bar=True)
-        
-        if self.hparams["contrastive_kernel_loss"]:
-            self.log("train/cls_loss", cls_loss, on_step=True, on_epoch=True, prog_bar=False)
-            self.log("train/kernel_loss", kernel_loss, on_step=True, on_epoch=True, prog_bar=False)
+        self.log("train/cls_loss", cls_loss, on_step=True, on_epoch=True, prog_bar=False)
+        self.log("train/kernel_loss", self.hparams["alpha"] * kernel_loss, on_step=True, on_epoch=True, prog_bar=False)
 
         optimizer = self.optimizers()  # returns a list, take the first optimizer
         current_lr = optimizer.param_groups[0]["lr"]
@@ -394,17 +389,15 @@ class Model(pl.LightningModule):
         logits = self.model(x)
 
         cls_loss = self.cls_criterion(logits, y)
-        if self.hparams["contrastive_kernel_loss"]:
-            kernel_list = self._get_kernel_list()
-            if self.hparams["mode"].lower() == "random-sampling":
-                kernel_list = self._select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
-            kernel_loss = (
-                self.kernel_loss_fn(kernel_list)
-                if kernel_list
-                else torch.tensor(0.0, device=self.device)
-            )
-        else:
-            kernel_loss = torch.tensor(0.0, device=self.device)
+        # Always compute contrastive kernel loss for monitoring
+        kernel_list = self._get_kernel_list()
+        if self.hparams["mode"].lower() == "random-sampling":
+            kernel_list = self._select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
+        kernel_loss = (
+            self.kernel_loss_fn(kernel_list)
+            if kernel_list
+            else torch.tensor(0.0, device=self.device)
+        )
 
         total_loss = cls_loss + (
             self.hparams["alpha"] * kernel_loss
@@ -418,9 +411,13 @@ class Model(pl.LightningModule):
         if dataloader_idx == 0:  # Validation
             self.log("val/loss", total_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
             self.log("val/acc", acc, on_step=False, on_epoch=True, prog_bar=True, add_dataloader_idx=False)
+            self.log("val/cls_loss", cls_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
+            self.log("val/kernel_loss", self.hparams["alpha"] * kernel_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
         else:  # Test
             self.log("test/loss", total_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False) 
             self.log("test/acc", acc, on_step=False, on_epoch=True, prog_bar=True, add_dataloader_idx=False)
+            self.log("test/cls_loss", cls_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
+            self.log("test/kernel_loss", self.hparams["alpha"] * kernel_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
             self.log("test_acc", acc, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)  # For checkpoint monitoring
         
         return total_loss

@@ -77,7 +77,11 @@ class BasicBlock(nn.Module):
 
     def forward(self, x):
         out = F.relu(self.bn1(self.conv1(x)))
+        # Force output to stderr which is less likely to be buffered
+        print(f"BasicBlock")
+        print(f"{out.shape}")
         out = self.bn2(self.conv2(out))
+        print(f"{out.shape}")
         out += self.shortcut(x)
         out = F.relu(out)
         return out
@@ -149,11 +153,19 @@ def test(net):
         total_params += np.prod(x.data.numpy().shape)
     print("Total number of params", total_params)
     print("Total layers", len(list(filter(lambda p: p.requires_grad and len(p.data.size())>1, net.parameters()))))
+    
+    # Test forward pass to trigger shape prints
+    print("Testing forward pass with sample CIFAR input (1, 3, 32, 32):")
+    import torch
+    sample_input = torch.randn(1, 3, 32, 32)
+    with torch.no_grad():
+        output = net(sample_input)
+    print(f"Final output shape: {output.shape}")
 
 
 if __name__ == "__main__":
     for net_name in __all__:
-        if net_name.startswith('resnet'):
+        if net_name.startswith('resnet20'):
             print(net_name)
             test(globals()[net_name]())
             print()
