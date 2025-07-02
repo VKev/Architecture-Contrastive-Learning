@@ -494,16 +494,17 @@ def main():
     dm = DataModule(args)
 
     callbacks = []
+    ckl_suffix = f"-ckl-n-{args.num_kernels}-m-{args.margin}" if args.contrastive_kernel_loss else ""
     ModelCheckpoint.CHECKPOINT_NAME_LAST = (
         f"{args.model}-{args.dataset}"
-        + ("-ckl" if args.contrastive_kernel_loss else "")
+        + ckl_suffix
         + "-{epoch}-{test_acc:.4f}-last"
     )
 
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoint",
         filename=f"{args.model}-{args.dataset}"
-        + ("-ckl" if args.contrastive_kernel_loss else "")
+        + ckl_suffix
         + "-{epoch}-{test_acc:.4f}",
         monitor="test_acc",
         mode="max",
@@ -520,9 +521,10 @@ def main():
 
     logger = None
     if args.wandb:
+        wandb_name = f"{args.model}-{args.dataset}" + ckl_suffix
         logger = WandbLogger(
             project="architecture-contrastive-loss",
-            name=f"{args.model}-{args.dataset}",
+            name=wandb_name,
             id=args.wandb_id,
             resume="allow",
             offline=False,
