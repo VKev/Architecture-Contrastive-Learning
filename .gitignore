@@ -1,0 +1,9 @@
+**/__pycache__/*
+**/wandb/*
+**/data/*
+**/*.pth/*
+**/*.ckpt/*
+*.pth
+*.ckpt
+**/*.pth
+lightning_logs/*

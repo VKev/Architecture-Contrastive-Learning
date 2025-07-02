@@ -1,0 +1,5 @@
+batch_size: 100
+contrastive_kernel_loss: True
+num_epochs: 250
+margin: 1
+lr: 0.1
