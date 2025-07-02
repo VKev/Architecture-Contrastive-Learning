@@ -50,98 +50,97 @@ def _ssim_pair_gpu(k1: torch.Tensor, k2: torch.Tensor, win_size: int | None = No
 
 
 class ContrastiveKernelLoss(nn.Module):
+    r"""
+    GPU-accelerated Contrastive-Kernel SSIM hinge loss.
+
+        hinge_ij = max(0, SSIM(k_i, k_j) - margin)
+
+    For each layer we average **only the positive hinge terms** (pairs whose
+    similarity exceeds `margin`); pairs with SSIM ≤ margin do not contribute.
+    The final loss is the mean of the per-layer losses.
     """
-    Ultra-fast GPU-accelerated Contrastive Kernel SSIM Loss using vectorized operations.
-    Hinge loss on SSIM similarity:
-        loss_ij = max(0, SSIM(k_i, k_j) - margin)
-    (diagonal ignored, averaged over all pairs & layers)
-    """
+
     def __init__(self, margin: float = 0.90, win_size: int | None = None):
         """
-        margin : float in (0, 1) — similarity above this value is penalised.
-        win_size : int | None   — odd window size for SSIM; set small (3/5)
-                                   when kernels are tiny (3×3, 5×5).
+        margin   – similarity above this value is penalised (0 < margin < 1).
+        win_size – odd SSIM window size. If None, use the largest odd value
+                   ≤11 that fits inside each kernel.
         """
         super().__init__()
         self.margin = margin
         self.win_size = win_size
 
-    def _vectorized_ssim(self, kernels, win_size):
+    # ------------------------------------------------------------------ #
+    # internal helper: pairwise SSIM
+    # ------------------------------------------------------------------ #
+    @staticmethod
+    def _pairwise_ssim(kernels: torch.Tensor, win_size: int) -> torch.Tensor:
         """
-        Compute SSIM for all kernel pairs using vectorized GPU operations.
+        Return the SSIM for every unordered pair (i < j) of kernels.
+
+        kernels : (n, h, w)
+        win_size: odd window size for SSIM
+        returns : (n·(n-1)/2,) vector of SSIM values
         """
         device = kernels.device
         n, h, w = kernels.shape
-        
-        # Ensure odd window size
-        if win_size % 2 == 0:
-            win_size -= 1
-        win_size = max(3, win_size)
-        
-        # Calculate dynamic range for all kernels
-        data_range = float((kernels.max() - kernels.min()).item())
-        if data_range == 0:
-            data_range = 1.0
-        
-        # Prepare all pairs for vectorized computation
-        # Create indices for upper triangular pairs (i < j)
-        i_indices, j_indices = torch.triu_indices(n, n, offset=1, device=device)
-        
-        # Get kernel pairs - shape: (num_pairs, 1, h, w)
-        kernels_i = kernels[i_indices].unsqueeze(1)  # (num_pairs, 1, h, w)
-        kernels_j = kernels[j_indices].unsqueeze(1)  # (num_pairs, 1, h, w)
-        
-        # Compute SSIM for all pairs at once
-        ssim_values = kornia_ssim(kernels_i, kernels_j, window_size=win_size, max_val=data_range)
-        
-        # Handle different return shapes from kornia
-        if ssim_values.ndim > 1:
-            ssim_values = ssim_values.mean(dim=tuple(range(1, ssim_values.ndim)))
-        
-        # Create symmetric matrix
-        ssim_mat = torch.zeros((n, n), device=device)
-        ssim_mat[i_indices, j_indices] = ssim_values
-        ssim_mat[j_indices, i_indices] = ssim_values  # Make symmetric
-        
-        return ssim_mat
 
-    def forward(self, kernels_list):
+        # force odd window size ≥3
+        win_size = max(3, win_size if win_size % 2 == 1 else win_size - 1)
+
+        # dynamic range (avoid zero)
+        data_range = float((kernels.max() - kernels.min()).item() or 1.0)
+
+        # indices of upper-triangular pairs
+        i_idx, j_idx = torch.triu_indices(n, n, offset=1, device=device)
+
+        # gather pairs and compute SSIM
+        ssim_vals = kornia_ssim(
+            kernels[i_idx].unsqueeze(1),  # (pairs,1,h,w)
+            kernels[j_idx].unsqueeze(1),  # (pairs,1,h,w)
+            window_size=win_size,
+            max_val=data_range,
+        )
+
+        # kornia can return extra dims; flatten them
+        if ssim_vals.ndim > 1:
+            ssim_vals = ssim_vals.mean(dim=tuple(range(1, ssim_vals.ndim)))
+
+        return ssim_vals  # (pairs,)
+
+    # ------------------------------------------------------------------ #
+    # forward
+    # ------------------------------------------------------------------ #
+    def forward(self, kernels_list: list[torch.Tensor]) -> torch.Tensor:
         """
-        kernels_list : list[Tensor] — each tensor shaped (n, d, d)
+        kernels_list – list of tensors, each of shape (n_k, d, d)
         """
-        start_time = time.time()
-        
         device = kernels_list[0].device
         total_loss, num_layers = 0.0, 0
 
-        for layer_idx, kernels in enumerate(kernels_list):
-            layer_start_time = time.time()
+        for kernels in kernels_list:
             n, d, d2 = kernels.shape
-            assert d == d2, "Each kernel must be square"
+            assert d == d2, "Each kernel must be square (d × d)"
 
+            # choose SSIM window
             w = self.win_size
             if w is None:
                 w = d if d % 2 == 1 else d - 1
                 w = min(w, 11)
 
-            # Vectorized SSIM computation
-            ssim_start_time = time.time()
-            ssim_mat = self._vectorized_ssim(kernels, w)
-            ssim_time = time.time() - ssim_start_time
+            # pairwise SSIM → hinge → keep positives only
+            ssim_vals = self._pairwise_ssim(kernels, w)
+            hinge_vals = F.relu(ssim_vals - self.margin)  # (pairs,)
 
-            # hinge: penalise high similarity
-            loss_mat = F.relu(ssim_mat - self.margin)
+            active = hinge_vals > 0
+            if active.any():
+                layer_loss = hinge_vals[active].mean()
+            else:
+                layer_loss = torch.tensor(0.0, device=device)
 
-            # average over off-diagonal pairs
-            num_pairs = n * (n - 1)
-            layer_loss = loss_mat.sum() / num_pairs
             total_loss += layer_loss
             num_layers += 1
-            
-            layer_time = time.time() - layer_start_time
 
-        total_time = time.time() - start_time
-        
         return total_loss / num_layers if num_layers else torch.tensor(0.0, device=device)
 
 
@@ -153,12 +152,57 @@ class SimpleConvModel(nn.Module):
         self.conv1 = nn.Conv2d(1, 512, kernel_size=3, padding=1)  # kernels: (512, 1, 3, 3)
         self.conv2 = nn.Conv2d(1, 512, kernel_size=7, padding=3)  # kernels: (512, 1, 7, 7)
         self.conv3 = nn.Conv2d(1, 512, kernel_size=5, padding=2)   # kernels: (512, 1, 5, 5)
+        
+        # Initialize with similar patterns
+        self._init_similar_weights()
+
+    def _init_similar_weights(self):
+        """Initialize convolutional layers with similar patterns for testing."""
+        with torch.no_grad():
+            # Base pattern for 3x3 kernels (Gaussian-like)
+            base_3x3 = torch.tensor([
+                [0.1, 0.2, 0.1],
+                [0.2, 0.4, 0.2],
+                [0.1, 0.2, 0.1]
+            ], dtype=torch.float32)
+            
+            # Initialize conv1 (3x3) with similar patterns
+            for i in range(self.conv1.weight.size(0)):
+                noise = torch.randn_like(base_3x3) * 0.05  # Small random variation
+                self.conv1.weight[i, 0] = base_3x3 + noise
+            
+            # Base pattern for larger kernels (edge-like patterns)
+            base_edge = torch.tensor([
+                [-0.1, -0.1, 0.0, 0.1, 0.1],
+                [-0.1, -0.2, 0.0, 0.2, 0.1],
+                [-0.1, -0.2, 0.0, 0.2, 0.1],
+                [-0.1, -0.2, 0.0, 0.2, 0.1],
+                [-0.1, -0.1, 0.0, 0.1, 0.1]
+            ], dtype=torch.float32)
+            
+            # Initialize conv3 (5x5) with similar edge patterns
+            for i in range(self.conv3.weight.size(0)):
+                noise = torch.randn_like(base_edge) * 0.1
+                self.conv3.weight[i, 0] = base_edge + noise
+            
+            # For 7x7 kernels, create expanded version of edge pattern
+            base_7x7 = torch.zeros(7, 7, dtype=torch.float32)
+            base_7x7[1:6, 1:6] = base_edge
+            
+            # Initialize conv2 (7x7) with similar patterns
+            for i in range(self.conv2.weight.size(0)):
+                noise = torch.randn_like(base_7x7) * 0.02
+                self.conv2.weight[i, 0] = base_7x7 + noise
 
     def forward(self, x):
         x = F.relu(self.conv1(x))
         x = F.relu(self.conv2(x))
         x = self.conv3(x)
         return x
+
+import random
+
+
 
 if __name__ == "__main__":
     # Instantiate the model.
