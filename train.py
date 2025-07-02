@@ -176,9 +176,6 @@ class Model(pl.LightningModule):
         if args.model.lower() == "resnet50":
             self.model = ResNet50(num_classes=self.num_classes, channels=channels)
 
-
-
-
         elif args.model.lower() == "vgg16":
             self.model = models.vgg16(weights=None)
             if channels == 1:
@@ -334,7 +331,7 @@ class Model(pl.LightningModule):
         if self.hparams["contrastive_kernel_loss"]:
             kernel_list = self._get_kernel_list()
             if self.hparams["mode"].lower() == "random-sampling":
-                kernel_list = self._select_random_kernels(kernel_list, k=64)
+                kernel_list = self._select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
             kernel_loss = (
                 self.kernel_loss_fn(kernel_list)
                 if kernel_list
@@ -400,7 +397,7 @@ class Model(pl.LightningModule):
         if self.hparams["contrastive_kernel_loss"]:
             kernel_list = self._get_kernel_list()
             if self.hparams["mode"].lower() == "random-sampling":
-                kernel_list = self._select_random_kernels(kernel_list, k=24)
+                kernel_list = self._select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
             kernel_loss = (
                 self.kernel_loss_fn(kernel_list)
                 if kernel_list
@@ -441,7 +438,8 @@ def parse_args():
     parser.add_argument("--alpha", type=float, default=1, help="Alpha parameter")
     parser.add_argument("--num_epochs", type=int, default=100, help="Number of epochs")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
-    parser.add_argument("--margin", type=float, default=8, help="Margin for contrastive loss")
+    parser.add_argument("--margin", type=float, default=0.2, help="Margin for contrastive loss")
+    parser.add_argument("--num_kernels", type=int, default=128, help="Number of kernels for contrastive loss")
     parser.add_argument("--model", type=str, default="resnet50", help="Model architecture (resnet50, vgg16, lenet5, googlenet, resnet20, resnet32, resnet44, resnet56, resnet110, resnet1202)")
     parser.add_argument("--mode", type=str, default="full-layer", help="full-layer or random-sampling")
     parser.add_argument("--dataset", choices=["mnist", "cifar10", "cifar100"], default="mnist", help="Dataset to use")
