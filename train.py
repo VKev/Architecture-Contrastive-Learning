@@ -523,7 +523,7 @@ def main():
     logger = None
     if args.wandb:
         logger = WandbLogger(
-            project="beyond-contrastive",
+            project="architecture-contrastive-loss",
             name=f"{args.model}-{args.dataset}",
             id=args.wandb_id,
             resume="allow",
