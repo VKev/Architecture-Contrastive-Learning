@@ -253,6 +253,9 @@ class Model(pl.LightningModule):
 
         self.cls_criterion = nn.CrossEntropyLoss()
         self.kernel_loss_fn = ContrastiveKernelLoss(margin=args.margin)
+        
+        # For fixed-sampling mode, store selected kernel indices
+        self.fixed_kernel_indices = None
 
         print(self.model)
 
@@ -315,9 +318,43 @@ class Model(pl.LightningModule):
         selected = []
         for kernels in kernel_list:
             N = kernels.shape[0]
-            k = min(k, N)
-            selected_indices = random.sample(range(N), k)
+            if k < 1.0:  # Percentage mode
+                k_actual = max(1, int(N * k))  # At least 1 kernel
+            else:  # Integer mode
+                k_actual = min(int(k), N)
+            selected_indices = random.sample(range(N), k_actual)
             selected.append(kernels[selected_indices])
+        return selected
+    
+    def _select_fixed_kernels(self, kernel_list, k=12):
+        # Initialize fixed indices if not already done
+        if self.fixed_kernel_indices is None:
+            self.fixed_kernel_indices = []
+            for kernels in kernel_list:
+                N = kernels.shape[0]
+                if k < 1.0:  # Percentage mode
+                    k_actual = max(1, int(N * k))  # At least 1 kernel
+                else:  # Integer mode
+                    k_actual = min(int(k), N)
+                # Use fixed seed for consistent selection
+                torch.manual_seed(self.args.seed)
+                selected_indices = torch.randperm(N)[:k_actual].tolist()
+                self.fixed_kernel_indices.append(selected_indices)
+        
+        # Use the stored indices to select kernels
+        selected = []
+        for i, kernels in enumerate(kernel_list):
+            if i < len(self.fixed_kernel_indices):
+                indices = self.fixed_kernel_indices[i]
+                selected.append(kernels[indices])
+            else:
+                # Fallback if somehow we have more layers than expected
+                N = kernels.shape[0]
+                if k < 1.0:  # Percentage mode
+                    k_actual = max(1, int(N * k))  # At least 1 kernel
+                else:  # Integer mode
+                    k_actual = min(int(k), N)
+                selected.append(kernels[:k_actual])
         return selected
 
     def training_step(self, batch, batch_idx):
@@ -331,6 +368,8 @@ class Model(pl.LightningModule):
         kernel_list = self._get_kernel_list()
         if self.hparams["mode"].lower() == "random-sampling":
             kernel_list = self._select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
+        elif self.hparams["mode"].lower() == "fixed-sampling":
+            kernel_list = self._select_fixed_kernels(kernel_list, k=self.hparams["num_kernels"])
         kernel_loss = (
             self.kernel_loss_fn(kernel_list)
             if kernel_list
@@ -393,6 +432,8 @@ class Model(pl.LightningModule):
         kernel_list = self._get_kernel_list()
         if self.hparams["mode"].lower() == "random-sampling":
             kernel_list = self._select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
+        elif self.hparams["mode"].lower() == "fixed-sampling":
+            kernel_list = self._select_fixed_kernels(kernel_list, k=self.hparams["num_kernels"])
         kernel_loss = (
             self.kernel_loss_fn(kernel_list)
             if kernel_list
@@ -436,9 +477,9 @@ def parse_args():
     parser.add_argument("--num_epochs", type=int, default=100, help="Number of epochs")
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--margin", type=float, default=0.2, help="Margin for contrastive loss")
-    parser.add_argument("--num_kernels", type=int, default=128, help="Number of kernels for contrastive loss")
+    parser.add_argument("--num_kernels", type=float, default=128, help="Number of kernels for contrastive loss (int for exact count, float <1 for percentage)")
     parser.add_argument("--model", type=str, default="resnet50", help="Model architecture (resnet50, vgg16, lenet5, googlenet, resnet20, resnet32, resnet44, resnet56, resnet110, resnet1202)")
-    parser.add_argument("--mode", type=str, default="full-layer", help="full-layer or random-sampling")
+    parser.add_argument("--mode", type=str, default="full-layer", help="full-layer, random-sampling, or fixed-sampling")
     parser.add_argument("--dataset", choices=["mnist", "cifar10", "cifar100"], default="mnist", help="Dataset to use")
     parser.add_argument("--save_every", type=int, default=10, help="Save checkpoint every n epochs")
     parser.add_argument("--contrastive_kernel_loss", action="store_true", help="Use contrastive kernel loss")

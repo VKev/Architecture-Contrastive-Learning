@@ -165,7 +165,7 @@ def test(net):
 
 if __name__ == "__main__":
     for net_name in __all__:
-        if net_name.startswith('resnet20'):
+        if net_name.startswith('resnet44'):
             print(net_name)
             test(globals()[net_name]())
             print()
