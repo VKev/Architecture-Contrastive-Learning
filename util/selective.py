@@ -424,8 +424,8 @@ def test_integration_with_loss():
             print(f"  Fixed selection consistency: {'✓ Identical' if identical else '✗ Different'}")
             
             # Test loss consistency
-            loss_1 = ContrastiveKernelLoss(margin=0.5)(selected_1)
-            loss_2 = ContrastiveKernelLoss(margin=0.5)(selected_2)
+            loss_1 = ContrastiveKernelLoss(margin=0.1)(selected_1)
+            loss_2 = ContrastiveKernelLoss(margin=0.1)(selected_2)
             loss_identical = abs(loss_1.item() - loss_2.item()) < 1e-6
             print(f"  Loss consistency: {'✓ Identical' if loss_identical else '✗ Different'} ({loss_1.item():.6f} vs {loss_2.item():.6f})")
             
