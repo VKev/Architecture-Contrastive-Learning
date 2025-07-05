@@ -113,30 +113,65 @@ class ContrastiveKernelLoss(nn.Module):
     # ------------------------------------------------------------------ #
     def forward(self, kernels_list: list[torch.Tensor]) -> torch.Tensor:
         """
-        kernels_list – list of tensors, each of shape (n_k, d, d)
+        kernels_list – list of tensors, each of shape (n_k, d, d) or (in_ch, n_k, d, d) for channel diversity
         """
         device = kernels_list[0].device
         total_loss, num_layers = 0.0, 0
 
         for kernels in kernels_list:
-            n, d, d2 = kernels.shape
-            assert d == d2, "Each kernel must be square (d × d)"
+            if len(kernels.shape) == 4:  # Channel diversity mode: (in_ch, out_ch, h, w)
+                in_ch, out_ch, d, d2 = kernels.shape
+                assert d == d2, "Each kernel must be square (d × d)"
 
-            # choose SSIM window
-            w = self.win_size
-            if w is None:
-                w = d if d % 2 == 1 else d - 1
-                w = min(w, 11)
+                # choose SSIM window
+                w = self.win_size
+                if w is None:
+                    w = d if d % 2 == 1 else d - 1
+                    w = min(w, 11)
 
-            # pairwise SSIM → hinge → keep positives only
-            ssim_vals = self._pairwise_ssim(kernels, w)
-            hinge_vals = F.relu(ssim_vals - self.margin)  # (pairs,)
+                # Calculate loss for each input channel separately
+                channel_losses = []
+                for ch in range(in_ch):
+                    ch_kernels = kernels[ch]  # shape: (out_ch, h, w)
+                    
+                    # Skip if only one kernel in this channel
+                    if out_ch <= 1:
+                        continue
+                    
+                    # pairwise SSIM → hinge → keep positives only
+                    ssim_vals = self._pairwise_ssim(ch_kernels, w)
+                    hinge_vals = F.relu(ssim_vals - self.margin)  # (pairs,)
 
-            active = hinge_vals > 0
-            if active.any():
-                layer_loss = hinge_vals[active].mean()
-            else:
-                layer_loss = torch.tensor(0.0, device=device)
+                    active = hinge_vals > 0
+                    if active.any():
+                        ch_loss = hinge_vals[active].mean()
+                        channel_losses.append(ch_loss)
+
+                # Average across input channels
+                if channel_losses:
+                    layer_loss = torch.stack(channel_losses).mean()
+                else:
+                    layer_loss = torch.tensor(0.0, device=device)
+
+            else:  # Normal mode: (n_k, d, d)
+                n, d, d2 = kernels.shape
+                assert d == d2, "Each kernel must be square (d × d)"
+
+                # choose SSIM window
+                w = self.win_size
+                if w is None:
+                    w = d if d % 2 == 1 else d - 1
+                    w = min(w, 11)
+
+                # pairwise SSIM → hinge → keep positives only
+                ssim_vals = self._pairwise_ssim(kernels, w)
+                hinge_vals = F.relu(ssim_vals - self.margin)  # (pairs,)
+
+                active = hinge_vals > 0
+                if active.any():
+                    layer_loss = hinge_vals[active].mean()
+                else:
+                    layer_loss = torch.tensor(0.0, device=device)
 
             total_loss += layer_loss
             num_layers += 1
@@ -253,7 +288,151 @@ if __name__ == "__main__":
     
     # Test with different margins
     print(f"\nTesting different margins (win_size=3):")
-    for margin in [0.5, 0.7, 0.9, 0.95]:
+    for margin in [0.1,0.5, 0.7, 0.9, 0.95]:
         loss_fn_margin = ContrastiveKernelLoss(margin=margin, win_size=3)
         loss_margin = loss_fn_margin([similar_kernels])
         print(f"Margin={margin}: Loss={loss_margin.item():.6f}")
+    
+    print("\n" + "="*60)
+    print("TESTING CHANNEL DIVERSITY MODE")
+    print("="*60)
+    
+    # Test channel diversity mode with TWO CASES: similar vs different kernels
+    print("Testing channel diversity mode with ContrastiveKernelLoss:")
+    
+    # Create test kernels in channel diversity format: (in_ch, out_ch, h, w)
+    # Simulate 3 input channels, 4 output channels per input channel, 3x3 kernels
+    in_channels, out_channels, kernel_size = 3, 4, 3
+    
+    # CASE 1: Similar kernels within each input channel
+    print("\n--- CASE 1: Similar kernels (should produce HIGH loss with low margin) ---")
+    similar_kernels = torch.zeros(in_channels, out_channels, kernel_size, kernel_size)
+    
+    # Base patterns for each input channel
+    base_patterns = [
+        torch.tensor([[1.0, 2.0, 1.0], [2.0, 4.0, 2.0], [1.0, 2.0, 1.0]]),  # Gaussian-like
+        torch.tensor([[1.0, 0.0, -1.0], [2.0, 0.0, -2.0], [1.0, 0.0, -1.0]]),  # Vertical edge
+        torch.tensor([[1.0, 2.0, 1.0], [0.0, 0.0, 0.0], [-1.0, -2.0, -1.0]])   # Horizontal edge
+    ]
+    
+    # Fill each input channel with similar kernels
+    for in_ch in range(in_channels):
+        base_pattern = base_patterns[in_ch]
+        for out_ch in range(out_channels):
+            # Add small random noise to create similar but not identical kernels
+            noise = torch.randn_like(base_pattern) * 0.1
+            similar_kernels[in_ch, out_ch] = base_pattern + noise
+    
+    print(f"Created similar kernels with shape: {similar_kernels.shape}")
+    
+    # CASE 2: Different kernels within each input channel
+    print("\n--- CASE 2: Different kernels (should produce LOW loss) ---")
+    different_kernels = torch.zeros(in_channels, out_channels, kernel_size, kernel_size)
+    
+    # Create very different patterns for each kernel within each input channel
+    different_patterns = [
+        # Input channel 0: Very different patterns
+        [
+            torch.tensor([[1.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]),  # Top-left corner
+            torch.tensor([[0.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 0.0]]),  # Center
+            torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0]]),  # Bottom-right corner
+            torch.tensor([[-1.0, 0.0, 1.0], [0.0, 0.0, 0.0], [1.0, 0.0, -1.0]])  # Diagonal
+        ],
+        # Input channel 1: More different patterns
+        [
+            torch.tensor([[1.0, 1.0, 1.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0]]),  # Top row
+            torch.tensor([[0.0, 0.0, 0.0], [1.0, 1.0, 1.0], [0.0, 0.0, 0.0]]),  # Middle row
+            torch.tensor([[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [1.0, 1.0, 1.0]]),  # Bottom row
+            torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0], [1.0, 0.0, 0.0]])   # Left column
+        ],
+        # Input channel 2: Even more different patterns
+        [
+            torch.tensor([[1.0, -1.0, 1.0], [-1.0, 1.0, -1.0], [1.0, -1.0, 1.0]]),  # Checkerboard
+            torch.tensor([[0.0, 1.0, 0.0], [1.0, 0.0, 1.0], [0.0, 1.0, 0.0]]),      # Inverted checkerboard
+            torch.tensor([[2.0, 0.0, 0.0], [0.0, 2.0, 0.0], [0.0, 0.0, 2.0]]),      # Diagonal line
+            torch.tensor([[0.0, 0.0, 2.0], [0.0, 2.0, 0.0], [2.0, 0.0, 0.0]])       # Anti-diagonal line
+        ]
+    ]
+    
+    # Fill each input channel with different kernels
+    for in_ch in range(in_channels):
+        for out_ch in range(out_channels):
+            different_kernels[in_ch, out_ch] = different_patterns[in_ch][out_ch]
+    
+    print(f"Created different kernels with shape: {different_kernels.shape}")
+    
+    # Test both cases with same margins
+    print(f"\nTesting both cases with margin=0.1:")
+    loss_fn_cd = ContrastiveKernelLoss(margin=0.1, win_size=3)
+    
+    loss_similar = loss_fn_cd([similar_kernels])
+    loss_different = loss_fn_cd([different_kernels])
+    
+    print(f"Similar kernels loss (margin=0.1): {loss_similar.item():.6f}")
+    print(f"Different kernels loss (margin=0.1): {loss_different.item():.6f}")
+    print(f"Difference: {loss_similar.item() - loss_different.item():.6f}")
+    
+    # Test with different margins for both cases
+    print("\nTesting different margins for both cases:")
+    for margin in [0.1, 0.3, 0.5, 0.7, 0.9]:
+        loss_fn_cd_margin = ContrastiveKernelLoss(margin=margin, win_size=3)
+        loss_similar_margin = loss_fn_cd_margin([similar_kernels])
+        loss_different_margin = loss_fn_cd_margin([different_kernels])
+        print(f"Margin={margin}: Similar={loss_similar_margin.item():.6f}, Different={loss_different_margin.item():.6f}")
+    
+    # Test with multiple layers in channel diversity mode
+    print("\nTesting multiple layers in channel diversity mode:")
+    # Create another layer with different dimensions
+    layer2_similar = torch.zeros(2, 6, 5, 5)  # 2 input channels, 6 output channels, 5x5 kernels
+    layer2_different = torch.zeros(2, 6, 5, 5)
+    
+    # Fill with similar patterns for layer2_similar
+    for in_ch in range(2):
+        base_5x5 = torch.randn(5, 5) * 0.5
+        for out_ch in range(6):
+            noise = torch.randn_like(base_5x5) * 0.1
+            layer2_similar[in_ch, out_ch] = base_5x5 + noise
+    
+    # Fill with different patterns for layer2_different
+    for in_ch in range(2):
+        for out_ch in range(6):
+            # Create very different random patterns
+            layer2_different[in_ch, out_ch] = torch.randn(5, 5) * 2.0
+    
+    # Test with both layers
+    multi_layer_loss_similar = loss_fn_cd([similar_kernels, layer2_similar])
+    multi_layer_loss_different = loss_fn_cd([different_kernels, layer2_different])
+    
+    print(f"Multi-layer similar kernels loss (Margin 0.1): {multi_layer_loss_similar.item():.6f}")
+    print(f"Multi-layer different kernels loss (Margin 0.1): {multi_layer_loss_different.item():.6f}")
+    
+    # Compare normal mode vs channel diversity mode
+    print("\n" + "="*50)
+    print("COMPARING NORMAL MODE vs CHANNEL DIVERSITY MODE")
+    print("="*50)
+    
+    # Convert channel diversity kernels to normal mode (flatten input channels)
+    normal_mode_similar = similar_kernels.view(-1, kernel_size, kernel_size)
+    normal_mode_different = different_kernels.view(-1, kernel_size, kernel_size)
+    
+    print(f"Normal mode shape: {normal_mode_similar.shape}")
+    print(f"Channel diversity shape: {similar_kernels.shape}")
+    
+    loss_normal_similar = loss_fn_cd([normal_mode_similar])
+    loss_normal_different = loss_fn_cd([normal_mode_different])
+    loss_cd_similar = loss_fn_cd([similar_kernels])
+    loss_cd_different = loss_fn_cd([different_kernels])
+    
+    print(f"\nSimilar kernels:")
+    print(f"  Normal mode loss: {loss_normal_similar.item():.6f}")
+    print(f"  Channel diversity loss: {loss_cd_similar.item():.6f}")
+    print(f"  Difference: {abs(loss_normal_similar.item() - loss_cd_similar.item()):.6f}")
+    
+    print(f"\nDifferent kernels:")
+    print(f"  Normal mode loss: {loss_normal_different.item():.6f}")
+    print(f"  Channel diversity loss: {loss_cd_different.item():.6f}")
+    print(f"  Difference: {abs(loss_normal_different.item() - loss_cd_different.item()):.6f}")
+    
+    print("\nNote: Channel diversity mode should generally produce different loss values")
+    print("because it only compares kernels within the same input channel,")
+    print("while normal mode compares all kernels with each other.")
