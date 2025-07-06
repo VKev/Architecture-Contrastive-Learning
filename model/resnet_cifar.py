@@ -78,10 +78,7 @@ class BasicBlock(nn.Module):
     def forward(self, x):
         out = F.relu(self.bn1(self.conv1(x)))
         # Force output to stderr which is less likely to be buffered
-        print(f"BasicBlock")
-        print(f"{out.shape}")
         out = self.bn2(self.conv2(out))
-        print(f"{out.shape}")
         out += self.shortcut(x)
         out = F.relu(out)
         return out
