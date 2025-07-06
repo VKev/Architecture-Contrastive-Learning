@@ -61,7 +61,7 @@ class ContrastiveKernelLoss(nn.Module):
     def __init__(self,
                  margin: float = 0.9,
                  win_size: int | None = None,
-                 pair_batch: int = 200_000):
+                 pair_batch: int = 600_000):
         """
         margin       – similarities above this are penalised (0<margin<1)
         win_size     – odd SSIM window ≤11; computed automatically if None
@@ -172,7 +172,7 @@ if __name__ == "__main__":
     print("="*60)
 
     # Test parameters
-    margin_test = 0.5
+    margin_test = 0.1
     lossfn_test = ContrastiveKernelLoss(margin=margin_test).to(device)
     
     # Small tests (8 kernels of 3x3)
@@ -281,7 +281,6 @@ if __name__ == "__main__":
     torch.cuda.synchronize(device) if device.type == "cuda" else None
     print(f"  Random tensor loss: {loss_random.item():.6f} – {1000*(time.time()-t0):.1f} ms")
     print(f"  Special tensor loss: {loss_special.item():.6f}")
-    print(f"  Ratio (special/random): {loss_special.item()/loss_random.item():.2f}")
     
     # Summary
     print(f"\n--- SUMMARY ---")

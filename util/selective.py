@@ -20,16 +20,37 @@ def get_kernel_weight_matrix(weight, ignore_sizes=[1, 3], channel_diversity=Fals
         return kernel_matrix
 
 
-def get_kernel_list(model, channel_diversity=False):
-    """Extract kernel list from a model."""
+def get_kernel_list(model, channel_diversity=False, select_layer_mode="default"):
+    """Extract kernel list from a model.
+    
+    Args:
+        model: The neural network model
+        channel_diversity: Whether to use channel diversity mode
+        select_layer_mode: Layer selection mode
+            - "default": Extract from all Conv2d layers (current behavior)
+            - "filter": Alternating pattern - take, ignore, take, ignore...
+    """
     kernel_list = []
+    conv_layer_count = 0
+    
     for module in model.modules():
         if isinstance(module, nn.Conv2d):
+            conv_layer_count += 1
+            
+            # Apply layer selection logic
+            if select_layer_mode == "filter":
+                # Take odd-numbered layers (1st, 3rd, 5th, etc.)
+                # Skip even-numbered layers (2nd, 4th, 6th, etc.)
+                if conv_layer_count % 2 == 0:  # Even layer, ignore
+                    continue
+            # For "default" mode, process all layers (no filtering)
+            
             filtered_kernels = get_kernel_weight_matrix(
                 module.weight, ignore_sizes=[1], channel_diversity=channel_diversity
             )
             if filtered_kernels is not None:
                 kernel_list.append(filtered_kernels)
+    
     return kernel_list
 
 def select_random_kernels(kernel_list, k=12):
@@ -163,6 +184,28 @@ def test_kernel_functions():
             print()
     
     print(f"Layers with extracted kernels (channel diversity): {len(kernel_list_cd)}")
+    
+    print("\n--- Kernel extraction test (filter mode) ---")
+    kernel_list_filter = get_kernel_list(model, select_layer_mode="filter")
+    conv_layer_count = 0
+    
+    for name, module in model.named_modules():
+        if isinstance(module, nn.Conv2d):
+            conv_layer_count += 1
+            filtered_kernels = get_kernel_weight_matrix(
+                module.weight, ignore_sizes=[1]
+            )
+            
+            if filtered_kernels is not None:
+                if conv_layer_count % 2 == 1:  # Odd layer, should be included
+                    print(f"Conv layer {conv_layer_count}: {name} -> INCLUDED")
+                else:  # Even layer, should be ignored
+                    print(f"Conv layer {conv_layer_count}: {name} -> IGNORED")
+            else:
+                print(f"Conv layer {conv_layer_count}: {name} -> IGNORED (size filter)")
+            
+    print(f"Layers with extracted kernels (filter mode): {len(kernel_list_filter)}")
+    print(f"Expected layers (odd-numbered with valid kernels): {len([i for i in range(1, conv_layer_count+1) if i % 2 == 1])}")
     
     if not kernel_list:
         print("No kernels extracted! Cannot test selection functions.")
@@ -360,77 +403,84 @@ def test_integration_with_loss():
         ("Channel Diversity Mode", True)
     ]
     
+    # Test both layer selection modes
+    layer_modes = [
+        ("Default Layer Selection", "default"),
+        ("Filter Layer Selection", "filter")
+    ]
+    
     for mode_name, channel_diversity in modes:
-        print(f"\n--- {mode_name} ---")
-        
-        # Extract kernels
-        kernel_list = get_kernel_list(model, channel_diversity=channel_diversity)
-        
-        if not kernel_list:
-            print(f"No kernels extracted in {mode_name}")
-            continue
-        
-        print(f"Extracted {len(kernel_list)} layers")
-        
-        # Test different k values
-        k_values = [0.25, 8]
-        
-        for k in k_values:
-            print(f"\nTesting with k={k}:")
+        for layer_mode_name, select_layer_mode in layer_modes:
+            print(f"\n--- {mode_name} + {layer_mode_name} ---")
             
-            # Select kernels
-            selected_kernels = select_random_kernels(kernel_list, k)
+            # Extract kernels
+            kernel_list = get_kernel_list(model, channel_diversity=channel_diversity, select_layer_mode=select_layer_mode)
             
-            # Print shapes
-            total_orig = 0
-            total_selected = 0
+            if not kernel_list:
+                print(f"No kernels extracted in {mode_name} + {layer_mode_name}")
+                continue
+        
+            print(f"Extracted {len(kernel_list)} layers")
             
-            for i, (orig, sel) in enumerate(zip(kernel_list, selected_kernels)):
-                if channel_diversity:
-                    orig_count = orig.shape[0] * orig.shape[1]
-                    sel_count = sel.shape[0] * sel.shape[1]
-                    print(f"  Layer {i+1}: {orig.shape} -> {sel.shape}")
-                else:
-                    orig_count = orig.shape[0]
-                    sel_count = sel.shape[0]
-                    print(f"  Layer {i+1}: {orig.shape} -> {sel.shape}")
+            # Test different k values
+            k_values = [0.25, 8]
+            
+            for k in k_values:
+                print(f"\nTesting with k={k}:")
                 
-                total_orig += orig_count
-                total_selected += sel_count
+                # Select kernels
+                selected_kernels = select_random_kernels(kernel_list, k)
+                
+                # Print shapes
+                total_orig = 0
+                total_selected = 0
+                
+                for i, (orig, sel) in enumerate(zip(kernel_list, selected_kernels)):
+                    if channel_diversity:
+                        orig_count = orig.shape[0] * orig.shape[1]
+                        sel_count = sel.shape[0] * sel.shape[1]
+                        print(f"  Layer {i+1}: {orig.shape} -> {sel.shape}")
+                    else:
+                        orig_count = orig.shape[0]
+                        sel_count = sel.shape[0]
+                        print(f"  Layer {i+1}: {orig.shape} -> {sel.shape}")
+                    
+                    total_orig += orig_count
+                    total_selected += sel_count
+                
+                print(f"  Total kernels: {total_orig} -> {total_selected}")
+                
+                # Test with ContrastiveKernelLoss
+                try:
+                    loss_fn = ContrastiveKernelLoss(margin=0.5, win_size=None)
+                    loss_value = loss_fn(selected_kernels)
+                    print(f"  Contrastive loss: {loss_value.item():.6f}")
+                except Exception as e:
+                    print(f"  Loss calculation error: {e}")
             
-            print(f"  Total kernels: {total_orig} -> {total_selected}")
-            
-            # Test with ContrastiveKernelLoss
+            # Test fixed selection for consistency
+            print(f"\nTesting fixed selection consistency:")
             try:
-                loss_fn = ContrastiveKernelLoss(margin=0.5, win_size=None)
-                loss_value = loss_fn(selected_kernels)
-                print(f"  Contrastive loss: {loss_value.item():.6f}")
+                selected_1 = select_fixed_kernels(kernel_list, k=8, seed=42)
+                selected_2 = select_fixed_kernels(kernel_list, k=8, seed=42)
+                
+                # Check consistency
+                identical = True
+                for sel1, sel2 in zip(selected_1, selected_2):
+                    if not torch.equal(sel1, sel2):
+                        identical = False
+                        break
+                
+                print(f"  Fixed selection consistency: {'✓ Identical' if identical else '✗ Different'}")
+                
+                # Test loss consistency
+                loss_1 = ContrastiveKernelLoss(margin=0.1)(selected_1)
+                loss_2 = ContrastiveKernelLoss(margin=0.1)(selected_2)
+                loss_identical = abs(loss_1.item() - loss_2.item()) < 1e-6
+                print(f"  Loss consistency: {'✓ Identical' if loss_identical else '✗ Different'} ({loss_1.item():.6f} vs {loss_2.item():.6f})")
+                
             except Exception as e:
-                print(f"  Loss calculation error: {e}")
-        
-        # Test fixed selection for consistency
-        print(f"\nTesting fixed selection consistency:")
-        try:
-            selected_1 = select_fixed_kernels(kernel_list, k=8, seed=42)
-            selected_2 = select_fixed_kernels(kernel_list, k=8, seed=42)
-            
-            # Check consistency
-            identical = True
-            for sel1, sel2 in zip(selected_1, selected_2):
-                if not torch.equal(sel1, sel2):
-                    identical = False
-                    break
-            
-            print(f"  Fixed selection consistency: {'✓ Identical' if identical else '✗ Different'}")
-            
-            # Test loss consistency
-            loss_1 = ContrastiveKernelLoss(margin=0.1)(selected_1)
-            loss_2 = ContrastiveKernelLoss(margin=0.1)(selected_2)
-            loss_identical = abs(loss_1.item() - loss_2.item()) < 1e-6
-            print(f"  Loss consistency: {'✓ Identical' if loss_identical else '✗ Different'} ({loss_1.item():.6f} vs {loss_2.item():.6f})")
-            
-        except Exception as e:
-            print(f"  Consistency test error: {e}")
+                print(f"  Consistency test error: {e}")
 
 
 if __name__ == "__main__":

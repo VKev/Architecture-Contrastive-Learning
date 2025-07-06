@@ -258,6 +258,7 @@ class Model(pl.LightningModule):
 
         print(self.model)
         print(f"Channel diversity mode: {'Enabled' if args.channel_diversity else 'Disabled'}")
+        print(f"Select layer mode: {args.select_layer_mode}")
         print(f"Kernel selection mode: {args.mode}")
         print(f"Number of kernels: {args.num_kernels}")
         print(f"Contrastive kernel loss: {'Enabled' if args.contrastive_kernel_loss else 'Disabled'}")
@@ -316,7 +317,7 @@ class Model(pl.LightningModule):
         cls_loss = self.cls_criterion(logits, y)
 
         # 2) Always compute contrastive kernel loss for monitoring
-        kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"])
+        kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"], select_layer_mode=self.hparams["select_layer_mode"])
         if self.hparams["mode"].lower() == "random-sampling":
             kernel_list = select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
         elif self.hparams["mode"].lower() == "fixed-sampling":
@@ -380,7 +381,7 @@ class Model(pl.LightningModule):
 
         cls_loss = self.cls_criterion(logits, y)
         # Always compute contrastive kernel loss for monitoring
-        kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"])
+        kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"], select_layer_mode=self.hparams["select_layer_mode"])
         if self.hparams["mode"].lower() == "random-sampling":
             kernel_list = select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
         elif self.hparams["mode"].lower() == "fixed-sampling":
@@ -440,6 +441,7 @@ def parse_args():
     parser.add_argument("--patience", type=int, default=10, help="Patience for early stopping")
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducibility")
     parser.add_argument("--channel_diversity", action="store_true", help="Use channel diversity mode for kernel extraction and loss calculation")
+    parser.add_argument("--select_layer_mode", type=str, default="default", choices=["default", "filter"], help="Layer selection mode: 'default' uses all Conv2d layers, 'filter' uses alternating pattern (take, ignore, take, ignore...)")
 
     args = parser.parse_args()
 
