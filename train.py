@@ -4,10 +4,12 @@ import random
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import random_split, DataLoader, Subset
+from torch.utils.data import random_split, DataLoader, Subset, TensorDataset
 from torchvision import datasets, transforms, models
 import yaml
 from sklearn.model_selection import train_test_split
+from sklearn.datasets import load_iris
+from sklearn.preprocessing import StandardScaler
 import numpy as np
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
@@ -32,6 +34,7 @@ from util import (
     get_kernel_list,
 )
 from model import ResNet50, LeNet5
+from model.mlp import SimpleMLP
 from model.resnet_cifar import resnet20, resnet32, resnet44, resnet56, resnet110, resnet1202
 
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -66,6 +69,9 @@ class DataModule(pl.LightningDataModule):
         elif self.dataset == "cifar10":
             datasets.CIFAR10(root="./data", train=True, download=True)
             datasets.CIFAR10(root="./data", train=False, download=True)
+        elif self.dataset == "iris":
+            # Iris dataset is loaded from sklearn, no download needed
+            pass
 
     def setup(self, stage=None):
         split = 0.9
@@ -125,16 +131,45 @@ class DataModule(pl.LightningDataModule):
             )
             split = 0.98
 
-        labels = np.array(full_dataset.targets)
-        train_idx, val_idx = train_test_split(
-            np.arange(len(full_dataset)),
-            test_size=1.0 - split,
-            stratify=labels,
-            random_state=42,
-        )
+        elif self.dataset == "iris":
+            # Load Iris dataset from sklearn
+            iris = load_iris()
+            X, y = iris.data, iris.target
+            
+            # Standardize features
+            scaler = StandardScaler()
+            X = scaler.fit_transform(X)
+            
+            # Convert to PyTorch tensors
+            X = torch.FloatTensor(X)
+            y = torch.LongTensor(y)
+            
+            # Split data: 80% train, 10% val, 10% test (standard split used in most papers)
+            X_temp, X_test, y_temp, y_test = train_test_split(
+                X, y, test_size=0.1, stratify=y, random_state=42
+            )
+            X_train, X_val, y_train, y_val = train_test_split(
+                X_temp, y_temp, test_size=0.1/(1-0.1), stratify=y_temp, random_state=42
+            )
+            
+            # Create TensorDatasets
+            self.train_dataset = TensorDataset(X_train, y_train)
+            self.val_dataset = TensorDataset(X_val, y_val)
+            self.test_dataset = TensorDataset(X_test, y_test)
+            
+            return  # Skip the general dataset splitting logic below
 
-        self.train_dataset = Subset(full_dataset, train_idx)
-        self.val_dataset = Subset(full_dataset, val_idx)
+        if self.dataset != "iris":
+            labels = np.array(full_dataset.targets)
+            train_idx, val_idx = train_test_split(
+                np.arange(len(full_dataset)),
+                test_size=1.0 - split,
+                stratify=labels,
+                random_state=42,
+            )
+
+            self.train_dataset = Subset(full_dataset, train_idx)
+            self.val_dataset = Subset(full_dataset, val_idx)
 
     def train_dataloader(self):
         return DataLoader(
@@ -174,8 +209,16 @@ class Model(pl.LightningModule):
             self.num_classes = 1000
         elif args.dataset in ["cifar100"]:
             self.num_classes = 100
+        elif args.dataset in ["iris"]:
+            self.num_classes = 3
 
-        if args.model.lower() == "resnet50":
+        if args.model.lower() == "simplemlp":
+            if args.dataset == "iris":
+                self.model = SimpleMLP(input_size=4, hidden1_size=128, hidden2_size=64, num_classes=3, dropout_rate=0.1)
+            else:
+                raise ValueError(f"{args.model} is designed for Iris dataset only")
+
+        elif args.model.lower() == "resnet50":
             self.model = ResNet50(num_classes=self.num_classes, channels=channels)
 
         elif args.model.lower() == "vgg16":
@@ -257,19 +300,30 @@ class Model(pl.LightningModule):
         self.kernel_loss_fn = ContrastiveKernelLoss(margin=args.margin)
 
         print(self.model)
-        print(f"Channel diversity mode: {'Enabled' if args.channel_diversity else 'Disabled'}")
-        print(f"Select layer mode: {args.select_layer_mode}")
-        print(f"Kernel selection mode: {args.mode}")
-        print(f"Number of kernels: {args.num_kernels}")
-        print(f"Contrastive kernel loss: {'Enabled' if args.contrastive_kernel_loss else 'Disabled'}")
-        if args.contrastive_kernel_loss:
-            print(f"Margin: {args.margin}, Alpha: {args.alpha}")
+        
+        if args.model.lower() != "simplemlp":
+            print(f"Channel diversity mode: {'Enabled' if args.channel_diversity else 'Disabled'}")
+            print(f"Select layer mode: {args.select_layer_mode}")
+            print(f"Kernel selection mode: {args.mode}")
+            print(f"Number of kernels: {args.num_kernels}")
+            print(f"Contrastive kernel loss: {'Enabled' if args.contrastive_kernel_loss else 'Disabled'}")
+            if args.contrastive_kernel_loss:
+                print(f"Margin: {args.margin}, Alpha: {args.alpha}")
+        else:
+            print("SimpleMLP: Contrastive kernel loss disabled for this model")
 
     def forward(self, x):
         return self.model(x)
 
     def configure_optimizers(self):
-        if self.args.model.lower() in ["googlenet"]:
+        if self.args.model.lower() in ["simplemlp"]:
+            optimizer = optim.Adam(
+                self.parameters(),
+                lr=self.args.lr,
+                weight_decay=self.args.weight_decay
+            )
+            
+        elif self.args.model.lower() in ["googlenet"]:
             optimizer = optim.AdamW(
                 self.parameters(),
                 lr=self.args.lr,
@@ -316,17 +370,19 @@ class Model(pl.LightningModule):
         # 1) Classification loss
         cls_loss = self.cls_criterion(logits, y)
 
-        # 2) Always compute contrastive kernel loss for monitoring
-        kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"], select_layer_mode=self.hparams["select_layer_mode"])
-        if self.hparams["mode"].lower() == "random-sampling":
-            kernel_list = select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
-        elif self.hparams["mode"].lower() == "fixed-sampling":
-            kernel_list = select_fixed_kernels(kernel_list, k=self.hparams["num_kernels"], seed=self.args.seed)
-        kernel_loss = (
-            self.kernel_loss_fn(kernel_list)
-            if kernel_list
-            else torch.tensor(0.0, device=self.device)
-        )
+        # 2) Compute contrastive kernel loss for monitoring (skip for SimpleMLP)
+        kernel_loss = torch.tensor(0.0, device=self.device)
+        if self.hparams["model"].lower() != "simplemlp":
+            kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"], select_layer_mode=self.hparams["select_layer_mode"])
+            if self.hparams["mode"].lower() == "random-sampling":
+                kernel_list = select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
+            elif self.hparams["mode"].lower() == "fixed-sampling":
+                kernel_list = select_fixed_kernels(kernel_list, k=self.hparams["num_kernels"], seed=self.args.seed)
+            kernel_loss = (
+                self.kernel_loss_fn(kernel_list)
+                if kernel_list
+                else torch.tensor(0.0, device=self.device)
+            )
 
         total_loss = cls_loss
         if self.hparams["contrastive_kernel_loss"]:
@@ -380,17 +436,19 @@ class Model(pl.LightningModule):
         logits = self.model(x)
 
         cls_loss = self.cls_criterion(logits, y)
-        # Always compute contrastive kernel loss for monitoring
-        kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"], select_layer_mode=self.hparams["select_layer_mode"])
-        if self.hparams["mode"].lower() == "random-sampling":
-            kernel_list = select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
-        elif self.hparams["mode"].lower() == "fixed-sampling":
-            kernel_list = select_fixed_kernels(kernel_list, k=self.hparams["num_kernels"], seed=self.args.seed)
-        kernel_loss = (
-            self.kernel_loss_fn(kernel_list)
-            if kernel_list
-            else torch.tensor(0.0, device=self.device)
-        )
+        # Compute contrastive kernel loss for monitoring (skip for SimpleMLP)
+        kernel_loss = torch.tensor(0.0, device=self.device)
+        if self.hparams["model"].lower() != "simplemlp":
+            kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"], select_layer_mode=self.hparams["select_layer_mode"])
+            if self.hparams["mode"].lower() == "random-sampling":
+                kernel_list = select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
+            elif self.hparams["mode"].lower() == "fixed-sampling":
+                kernel_list = select_fixed_kernels(kernel_list, k=self.hparams["num_kernels"], seed=self.args.seed)
+            kernel_loss = (
+                self.kernel_loss_fn(kernel_list)
+                if kernel_list
+                else torch.tensor(0.0, device=self.device)
+            )
 
         total_loss = cls_loss + (
             self.hparams["alpha"] * kernel_loss
@@ -430,9 +488,9 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--margin", type=float, default=0.2, help="Margin for contrastive loss")
     parser.add_argument("--num_kernels", type=float, default=128, help="Number of kernels for contrastive loss (int for exact count, float <1 for percentage)")
-    parser.add_argument("--model", type=str, default="resnet50", help="Model architecture (resnet50, vgg16, lenet5, googlenet, resnet20, resnet32, resnet44, resnet56, resnet110, resnet1202)")
+    parser.add_argument("--model", type=str, default="resnet50", help="Model architecture (resnet50, vgg16, lenet5, googlenet, resnet20, resnet32, resnet44, resnet56, resnet110, resnet1202, simplemlp)")
     parser.add_argument("--mode", type=str, default="full-layer", help="Kernel selection mode: full-layer, random-sampling, or fixed-sampling")
-    parser.add_argument("--dataset", choices=["mnist", "cifar10", "cifar100"], default="mnist", help="Dataset to use")
+    parser.add_argument("--dataset", choices=["mnist", "cifar10", "cifar100", "iris"], default="mnist", help="Dataset to use")
     parser.add_argument("--save_every", type=int, default=10, help="Save checkpoint every n epochs")
     parser.add_argument("--contrastive_kernel_loss", action="store_true", help="Use contrastive kernel loss")
     parser.add_argument("--wandb", action="store_true", help="Use WandB logging")
@@ -487,7 +545,7 @@ def main():
 
     callbacks = []
     ckl_suffix = f"-ckl-n-{args.num_kernels}-m-{args.margin}-a-{args.alpha}" if args.contrastive_kernel_loss else ""
-    cd_suffix = "-cd" if args.channel_diversity else ""
+    cd_suffix = ("-cd" if args.channel_diversity else "" ) if args.contrastive_kernel_loss else ""
     ModelCheckpoint.CHECKPOINT_NAME_LAST = (
         f"{args.model}-{args.dataset}"
         + ckl_suffix
