@@ -268,13 +268,31 @@ class Model(pl.LightningModule):
                 raise ValueError(f"{args.model} only supports 1-channel input")
 
         elif args.model.lower() == "googlenet":
+            # Enable auxiliary logits for CIFAR-GoogLeNet
             self.model = models.googlenet(
-                weights=None, num_classes=self.num_classes, aux_logits=False
+                weights=None, num_classes=self.num_classes, aux_logits=True
             )
+            
+            # Modify for CIFAR-GoogLeNet architecture:
+            # 1. Change first 7×7 stride-2 conv → 3×3 stride-1
             if channels == 1:
                 self.model.conv1.conv = nn.Conv2d(
-                    1, 64, kernel_size=7, stride=2, padding=3, bias=False
+                    1, 64, kernel_size=3, stride=1, padding=1, bias=False
                 )
+            else:
+                self.model.conv1.conv = nn.Conv2d(
+                    3, 64, kernel_size=3, stride=1, padding=1, bias=False
+                )
+            
+            # 2. Remove the initial 3×3 max-pool (replace with identity)
+            self.model.maxpool1 = nn.Identity()
+            
+            # 3. Resize auxiliary classifiers to match num_classes
+            # First auxiliary classifier (aux1)
+            self.model.aux1.fc2 = nn.Linear(1024, self.num_classes)
+            # Second auxiliary classifier (aux2) 
+            self.model.aux2.fc2 = nn.Linear(1024, self.num_classes)
+            # Main classifier is already set correctly by num_classes parameter
 
         # CIFAR ResNet models
         elif args.model.lower() == "resnet20":
