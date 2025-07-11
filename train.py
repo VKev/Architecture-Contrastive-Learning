@@ -380,13 +380,26 @@ class Model(pl.LightningModule):
             )
             
         elif self.args.model.lower() in ["googlenet"]:
-            optimizer = optim.AdamW(
-                self.parameters(),
-                lr=self.args.lr,
-                weight_decay=self.args.weight_decay,
-                betas=(0.9, 0.999),
-                eps=1e-8,
+            optimizer = optim.SGD(
+                self.parameters(), 
+                lr=self.args.lr, 
+                momentum=0.9, 
+                weight_decay=self.args.weight_decay
             )
+            
+            # Step decay: multiply by 0.1 every 60 epochs
+            scheduler = optim.lr_scheduler.StepLR(
+                optimizer, step_size=60, gamma=0.1
+            )
+            
+            return {
+                "optimizer": optimizer,
+                "lr_scheduler": {
+                    "scheduler": scheduler,
+                    "interval": "epoch",
+                    "frequency": 1,
+                },
+            }
 
         elif self.args.model.lower() in [
             "resnet50",
