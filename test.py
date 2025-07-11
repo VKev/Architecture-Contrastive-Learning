@@ -13,7 +13,7 @@ def parse_args():
     parser.add_argument("--alpha", type=float, default=1, help="Alpha parameter")
     parser.add_argument("--num_epochs", type=int, default=100, help="Number of epochs")
     parser.add_argument("--batch_size", type=int, default=256, help="Batch size")
-    parser.add_argument("--margin", type=float, default=8, help="Margin for contrastive loss")
+    parser.add_argument("--margin", type=float, default=0.1, help="Margin for contrastive loss")
     parser.add_argument("--model", type=str, default="resnet50", help="Model architecture")
     parser.add_argument("--mode", type=str, default="full-layer", help="full-layer or random-sampling")
     parser.add_argument("--dataset", choices=["mnist", "cifar10"], default="mnist", help="Dataset to use")
@@ -22,6 +22,9 @@ def parse_args():
     parser.add_argument("--wandb", action="store_true", help="Use WandB logging")
     parser.add_argument("--early_stopping", action="store_true", help="Enable early stopping")
     parser.add_argument("--patience", type=int, default=10, help="Patience for early stopping")
+    parser.add_argument("--channel_diversity", action="store_true", help="Use channel diversity mode for kernel extraction and loss calculation")
+    parser.add_argument("--select_layer_mode", type=str, default="default", choices=["default", "filter"], help="Layer selection mode: 'default' uses all Conv2d layers, 'filter' uses alternating pattern (take, ignore, take, ignore...)")
+    parser.add_argument("--num_kernels", type=float, default=128, help="Number of kernels for contrastive loss (int for exact count, float <1 for percentage)")
 
     args = parser.parse_args()
     

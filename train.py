@@ -8,7 +8,7 @@ from torch.utils.data import random_split, DataLoader, Subset, TensorDataset
 from torchvision import datasets, transforms, models
 import yaml
 from sklearn.model_selection import train_test_split
-from sklearn.datasets import load_iris
+from sklearn.datasets import load_iris, load_breast_cancer
 from sklearn.preprocessing import StandardScaler
 import numpy as np
 import pytorch_lightning as pl
@@ -18,6 +18,8 @@ import warnings
 import shutil
 import wandb
 import torch.nn.functional as F
+import wandb
+wandb.login(key="b8b74d6af92b4dea7706baeae8b86083dad5c941")
 
 torch.set_float32_matmul_precision('high')
 
@@ -33,6 +35,8 @@ from util import (
     select_fixed_kernels,
     get_kernel_list,
 )
+from util.loss_neural import ContrastiveLinearLoss
+from util.selective_neural import get_neuron_list, select_random_neurons, select_fixed_neurons
 from model import ResNet50, LeNet5
 from model.mlp import SimpleMLP
 from model.resnet_cifar import resnet20, resnet32, resnet44, resnet56, resnet110, resnet1202
@@ -71,6 +75,9 @@ class DataModule(pl.LightningDataModule):
             datasets.CIFAR10(root="./data", train=False, download=True)
         elif self.dataset == "iris":
             # Iris dataset is loaded from sklearn, no download needed
+            pass
+        elif self.dataset == "breast_cancer":
+            # Breast cancer dataset is loaded from sklearn, no download needed
             pass
 
     def setup(self, stage=None):
@@ -144,22 +151,43 @@ class DataModule(pl.LightningDataModule):
             X = torch.FloatTensor(X)
             y = torch.LongTensor(y)
             
-            # Split data: 80% train, 10% val, 10% test (standard split used in most papers)
-            X_temp, X_test, y_temp, y_test = train_test_split(
-                X, y, test_size=0.1, stratify=y, random_state=42
-            )
-            X_train, X_val, y_train, y_val = train_test_split(
-                X_temp, y_temp, test_size=0.1/(1-0.1), stratify=y_temp, random_state=42
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.5, stratify=y, random_state=42
             )
             
             # Create TensorDatasets
             self.train_dataset = TensorDataset(X_train, y_train)
-            self.val_dataset = TensorDataset(X_val, y_val)
+            self.val_dataset = TensorDataset(X_test, y_test)  # Use test set for validation
             self.test_dataset = TensorDataset(X_test, y_test)
             
             return  # Skip the general dataset splitting logic below
 
-        if self.dataset != "iris":
+        elif self.dataset == "breast_cancer":
+            # Load Breast Cancer dataset from sklearn
+            cancer = load_breast_cancer()
+            X, y = cancer.data, cancer.target
+            
+            # Standardize features
+            scaler = StandardScaler()
+            X = scaler.fit_transform(X)
+            
+            # Convert to PyTorch tensors
+            X = torch.FloatTensor(X)
+            y = torch.LongTensor(y)
+            
+            # Split data: 50% train, 50% test (following user's preference)
+            X_train, X_test, y_train, y_test = train_test_split(
+                X, y, test_size=0.5, stratify=y, random_state=42
+            )
+            
+            # Create TensorDatasets
+            self.train_dataset = TensorDataset(X_train, y_train)
+            self.val_dataset = TensorDataset(X_test, y_test)  # Use test set for validation
+            self.test_dataset = TensorDataset(X_test, y_test)
+            
+            return  # Skip the general dataset splitting logic below
+
+        if self.dataset not in ["iris", "breast_cancer"]:
             labels = np.array(full_dataset.targets)
             train_idx, val_idx = train_test_split(
                 np.arange(len(full_dataset)),
@@ -211,12 +239,16 @@ class Model(pl.LightningModule):
             self.num_classes = 100
         elif args.dataset in ["iris"]:
             self.num_classes = 3
+        elif args.dataset in ["breast_cancer"]:
+            self.num_classes = 2
 
         if args.model.lower() == "simplemlp":
             if args.dataset == "iris":
-                self.model = SimpleMLP(input_size=4, hidden1_size=128, hidden2_size=64, num_classes=3, dropout_rate=0.1)
+                self.model = SimpleMLP(input_size=4, hidden_sizes=[64,128,256,64], num_classes=3, dropout_rate=0.1)
+            elif args.dataset == "breast_cancer":
+                self.model = SimpleMLP(input_size=30, hidden_sizes=[64,128,256,64], num_classes=2, dropout_rate=0.1)
             else:
-                raise ValueError(f"{args.model} is designed for Iris dataset only")
+                raise ValueError(f"{args.model} is designed for Iris and Breast Cancer datasets only")
 
         elif args.model.lower() == "resnet50":
             self.model = ResNet50(num_classes=self.num_classes, channels=channels)
@@ -298,10 +330,18 @@ class Model(pl.LightningModule):
 
         self.cls_criterion = nn.CrossEntropyLoss()
         self.kernel_loss_fn = ContrastiveKernelLoss(margin=args.margin)
+        self.linear_loss_fn = ContrastiveLinearLoss(margin=args.margin)
 
         print(self.model)
         
-        if args.model.lower() != "simplemlp":
+        if args.model.lower() == "simplemlp":
+            print("SimpleMLP model detected")
+            print(f"Contrastive linear loss: {'Enabled' if args.contrastive_linear_loss else 'Disabled'}")
+            if args.contrastive_linear_loss:
+                print(f"Linear loss mode: {args.mode}")
+                print(f"Number of neurons: {args.num_kernels}")
+                print(f"Margin: {args.margin}, Alpha: {args.alpha}")
+        else:
             print(f"Channel diversity mode: {'Enabled' if args.channel_diversity else 'Disabled'}")
             print(f"Select layer mode: {args.select_layer_mode}")
             print(f"Kernel selection mode: {args.mode}")
@@ -309,8 +349,6 @@ class Model(pl.LightningModule):
             print(f"Contrastive kernel loss: {'Enabled' if args.contrastive_kernel_loss else 'Disabled'}")
             if args.contrastive_kernel_loss:
                 print(f"Margin: {args.margin}, Alpha: {args.alpha}")
-        else:
-            print("SimpleMLP: Contrastive kernel loss disabled for this model")
 
     def forward(self, x):
         return self.model(x)
@@ -370,32 +408,58 @@ class Model(pl.LightningModule):
         # 1) Classification loss
         cls_loss = self.cls_criterion(logits, y)
 
-        # 2) Compute contrastive kernel loss for monitoring (skip for SimpleMLP)
-        kernel_loss = torch.tensor(0.0, device=self.device)
-        if self.hparams["model"].lower() != "simplemlp":
-            kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"], select_layer_mode=self.hparams["select_layer_mode"])
-            if self.hparams["mode"].lower() == "random-sampling":
-                kernel_list = select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
-            elif self.hparams["mode"].lower() == "fixed-sampling":
-                kernel_list = select_fixed_kernels(kernel_list, k=self.hparams["num_kernels"], seed=self.args.seed)
-            kernel_loss = (
-                self.kernel_loss_fn(kernel_list)
-                if kernel_list
-                else torch.tensor(0.0, device=self.device)
-            )
+        # 2) Compute contrastive loss based on model type
+        contrastive_loss = torch.tensor(0.0, device=self.device)
+        
+        if self.hparams["model"].lower() == "simplemlp":
+            # Use contrastive linear loss for SimpleMLP
+            if self.hparams["contrastive_linear_loss"]:
+                neuron_list = get_neuron_list(self.model, select_layer_mode=self.hparams["select_layer_mode"])
+                if self.hparams["mode"].lower() == "random-sampling":
+                    neuron_list = select_random_neurons(neuron_list, k=self.hparams["num_kernels"])
+                elif self.hparams["mode"].lower() == "fixed-sampling":
+                    neuron_list = select_fixed_neurons(neuron_list, k=self.hparams["num_kernels"], seed=self.args.seed)
+                contrastive_loss = (
+                    self.linear_loss_fn(neuron_list)
+                    if neuron_list
+                    else torch.tensor(0.0, device=self.device)
+                )
+        else:
+            # Use contrastive kernel loss for other models
+            if self.hparams["contrastive_kernel_loss"]:
+                kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"], select_layer_mode=self.hparams["select_layer_mode"])
+                if self.hparams["mode"].lower() == "random-sampling":
+                    kernel_list = select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
+                elif self.hparams["mode"].lower() == "fixed-sampling":
+                    kernel_list = select_fixed_kernels(kernel_list, k=self.hparams["num_kernels"], seed=self.args.seed)
+                contrastive_loss = (
+                    self.kernel_loss_fn(kernel_list)
+                    if kernel_list
+                    else torch.tensor(0.0, device=self.device)
+                )
 
+        # 3) Total loss
         total_loss = cls_loss
-        if self.hparams["contrastive_kernel_loss"]:
-            total_loss = total_loss + self.hparams["alpha"] * kernel_loss
+        use_contrastive = (
+            self.hparams["contrastive_linear_loss"] if self.hparams["model"].lower() == "simplemlp"
+            else self.hparams["contrastive_kernel_loss"]
+        )
+        if use_contrastive:
+            total_loss = total_loss + self.hparams["alpha"] * contrastive_loss
 
-        # 3) Compute accuracy and log metrics
+        # 4) Compute accuracy and log metrics
         preds = torch.argmax(logits, dim=1)
         acc = (preds == y).float().mean()
 
         self.log("train/loss", total_loss, on_step=True, on_epoch=True, prog_bar=False)
         self.log("train/acc", acc, on_step=True, on_epoch=True, prog_bar=True)
         self.log("train/cls_loss", cls_loss, on_step=True, on_epoch=True, prog_bar=False)
-        self.log("train/kernel_loss", self.hparams["alpha"] * kernel_loss, on_step=True, on_epoch=True, prog_bar=False)
+        
+        # Log appropriate contrastive loss
+        if self.hparams["model"].lower() == "simplemlp":
+            self.log("train/linear_loss", self.hparams["alpha"] * contrastive_loss, on_step=True, on_epoch=True, prog_bar=False)
+        else:
+            self.log("train/kernel_loss", self.hparams["alpha"] * contrastive_loss, on_step=True, on_epoch=True, prog_bar=False)
 
         optimizer = self.optimizers()  # returns a list, take the first optimizer
         current_lr = optimizer.param_groups[0]["lr"]
@@ -429,31 +493,49 @@ class Model(pl.LightningModule):
                     prog_bar=False,
                 )
 
-
-
     def validation_step(self, batch, batch_idx, dataloader_idx: int = 0):
         x, y = batch
         logits = self.model(x)
 
         cls_loss = self.cls_criterion(logits, y)
-        # Compute contrastive kernel loss for monitoring (skip for SimpleMLP)
-        kernel_loss = torch.tensor(0.0, device=self.device)
-        if self.hparams["model"].lower() != "simplemlp":
-            kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"], select_layer_mode=self.hparams["select_layer_mode"])
-            if self.hparams["mode"].lower() == "random-sampling":
-                kernel_list = select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
-            elif self.hparams["mode"].lower() == "fixed-sampling":
-                kernel_list = select_fixed_kernels(kernel_list, k=self.hparams["num_kernels"], seed=self.args.seed)
-            kernel_loss = (
-                self.kernel_loss_fn(kernel_list)
-                if kernel_list
-                else torch.tensor(0.0, device=self.device)
-            )
+        
+        # Compute contrastive loss based on model type
+        contrastive_loss = torch.tensor(0.0, device=self.device)
+        
+        if self.hparams["model"].lower() == "simplemlp":
+            # Use contrastive linear loss for SimpleMLP
+            if self.hparams["contrastive_linear_loss"]:
+                neuron_list = get_neuron_list(self.model, select_layer_mode=self.hparams["select_layer_mode"])
+                if self.hparams["mode"].lower() == "random-sampling":
+                    neuron_list = select_random_neurons(neuron_list, k=self.hparams["num_kernels"])
+                elif self.hparams["mode"].lower() == "fixed-sampling":
+                    neuron_list = select_fixed_neurons(neuron_list, k=self.hparams["num_kernels"], seed=self.args.seed)
+                contrastive_loss = (
+                    self.linear_loss_fn(neuron_list)
+                    if neuron_list
+                    else torch.tensor(0.0, device=self.device)
+                )
+        else:
+            # Use contrastive kernel loss for other models
+            if self.hparams["contrastive_kernel_loss"]:
+                kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"], select_layer_mode=self.hparams["select_layer_mode"])
+                if self.hparams["mode"].lower() == "random-sampling":
+                    kernel_list = select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
+                elif self.hparams["mode"].lower() == "fixed-sampling":
+                    kernel_list = select_fixed_kernels(kernel_list, k=self.hparams["num_kernels"], seed=self.args.seed)
+                contrastive_loss = (
+                    self.kernel_loss_fn(kernel_list)
+                    if kernel_list
+                    else torch.tensor(0.0, device=self.device)
+                )
 
+        # Total loss
+        use_contrastive = (
+            self.hparams["contrastive_linear_loss"] if self.hparams["model"].lower() == "simplemlp"
+            else self.hparams["contrastive_kernel_loss"]
+        )
         total_loss = cls_loss + (
-            self.hparams["alpha"] * kernel_loss
-            if self.hparams["contrastive_kernel_loss"]
-            else 0.0
+            self.hparams["alpha"] * contrastive_loss if use_contrastive else 0.0
         )
 
         preds = torch.argmax(logits, dim=1)
@@ -463,12 +545,22 @@ class Model(pl.LightningModule):
             self.log("val/loss", total_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
             self.log("val/acc", acc, on_step=False, on_epoch=True, prog_bar=True, add_dataloader_idx=False)
             self.log("val/cls_loss", cls_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
-            self.log("val/kernel_loss", self.hparams["alpha"] * kernel_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
+            
+            # Log appropriate contrastive loss
+            if self.hparams["model"].lower() == "simplemlp":
+                self.log("val/linear_loss", self.hparams["alpha"] * contrastive_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
+            else:
+                self.log("val/kernel_loss", self.hparams["alpha"] * contrastive_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
         else:  # Test
             self.log("test/loss", total_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False) 
             self.log("test/acc", acc, on_step=False, on_epoch=True, prog_bar=True, add_dataloader_idx=False)
             self.log("test/cls_loss", cls_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
-            self.log("test/kernel_loss", self.hparams["alpha"] * kernel_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
+            
+            # Log appropriate contrastive loss
+            if self.hparams["model"].lower() == "simplemlp":
+                self.log("test/linear_loss", self.hparams["alpha"] * contrastive_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
+            else:
+                self.log("test/kernel_loss", self.hparams["alpha"] * contrastive_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
             self.log("test_acc", acc, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)  # For checkpoint monitoring
         
         return total_loss
@@ -490,9 +582,10 @@ def parse_args():
     parser.add_argument("--num_kernels", type=float, default=128, help="Number of kernels for contrastive loss (int for exact count, float <1 for percentage)")
     parser.add_argument("--model", type=str, default="resnet50", help="Model architecture (resnet50, vgg16, lenet5, googlenet, resnet20, resnet32, resnet44, resnet56, resnet110, resnet1202, simplemlp)")
     parser.add_argument("--mode", type=str, default="full-layer", help="Kernel selection mode: full-layer, random-sampling, or fixed-sampling")
-    parser.add_argument("--dataset", choices=["mnist", "cifar10", "cifar100", "iris"], default="mnist", help="Dataset to use")
+    parser.add_argument("--dataset", choices=["mnist", "cifar10", "cifar100", "iris", "breast_cancer"], default="mnist", help="Dataset to use")
     parser.add_argument("--save_every", type=int, default=10, help="Save checkpoint every n epochs")
     parser.add_argument("--contrastive_kernel_loss", action="store_true", help="Use contrastive kernel loss")
+    parser.add_argument("--contrastive_linear_loss", action="store_true", help="Use contrastive linear loss (only for SimpleMLP)")
     parser.add_argument("--wandb", action="store_true", help="Use WandB logging")
     parser.add_argument("--device", type=str, default="auto", help="device")
     parser.add_argument("--early_stopping", action="store_true", help="Enable early stopping")
@@ -545,10 +638,15 @@ def main():
 
     callbacks = []
     ckl_suffix = f"-ckl-n-{args.num_kernels}-m-{args.margin}-a-{args.alpha}" if args.contrastive_kernel_loss else ""
+    cll_suffix = f"-cll-n-{args.num_kernels}-m-{args.margin}-a-{args.alpha}" if args.contrastive_linear_loss else ""
     cd_suffix = ("-cd" if args.channel_diversity else "" ) if args.contrastive_kernel_loss else ""
+    
+    # Choose appropriate suffix based on model type
+    contrastive_suffix = cll_suffix if args.model.lower() == "simplemlp" else ckl_suffix
+    
     ModelCheckpoint.CHECKPOINT_NAME_LAST = (
         f"{args.model}-{args.dataset}"
-        + ckl_suffix
+        + contrastive_suffix
         + cd_suffix
         + "-{epoch}-{test_acc:.4f}-last"
     )
@@ -556,7 +654,7 @@ def main():
     checkpoint_callback = ModelCheckpoint(
         dirpath="checkpoint",
         filename=f"{args.model}-{args.dataset}"
-        + ckl_suffix
+        + contrastive_suffix
         + cd_suffix
         + "-{epoch}-{test_acc:.4f}",
         monitor="test_acc",
@@ -574,7 +672,7 @@ def main():
 
     logger = None
     if args.wandb:
-        wandb_name = f"{args.model}-{args.dataset}" + ckl_suffix + cd_suffix
+        wandb_name = f"{args.model}-{args.dataset}" + contrastive_suffix + cd_suffix
         logger = WandbLogger(
             project="architecture-contrastive-loss",
             name=wandb_name,
