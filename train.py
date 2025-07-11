@@ -40,6 +40,7 @@ from util.selective_neural import get_neuron_list, select_random_neurons, select
 from model import ResNet50, LeNet5
 from model.mlp import SimpleMLP
 from model.resnet_cifar import resnet20, resnet32, resnet44, resnet56, resnet110, resnet1202
+from model.googlenet import googlenet
 
 warnings.filterwarnings("ignore", category=UserWarning)
 
@@ -268,31 +269,18 @@ class Model(pl.LightningModule):
                 raise ValueError(f"{args.model} only supports 1-channel input")
 
         elif args.model.lower() == "googlenet":
-            # Enable auxiliary logits for CIFAR-GoogLeNet
-            self.model = models.googlenet(
-                weights=None, num_classes=self.num_classes, aux_logits=True
-            )
+            # Use custom CIFAR-optimized GoogleNet implementation
+            self.model = googlenet()
             
-            # Modify for CIFAR-GoogLeNet architecture:
-            # 1. Change first 7×7 stride-2 conv → 3×3 stride-1
+            # Adjust final linear layer for correct number of classes
+            # The custom GoogleNet has a linear layer that outputs 10 classes by default
+            if self.num_classes != 10:
+                in_features = self.model.linear.in_features
+                self.model.linear = nn.Linear(in_features, self.num_classes)
+            
+            # Handle single channel input (for MNIST)
             if channels == 1:
-                self.model.conv1.conv = nn.Conv2d(
-                    1, 64, kernel_size=3, stride=1, padding=1, bias=False
-                )
-            else:
-                self.model.conv1.conv = nn.Conv2d(
-                    3, 64, kernel_size=3, stride=1, padding=1, bias=False
-                )
-            
-            # 2. Remove the initial 3×3 max-pool (replace with identity)
-            self.model.maxpool1 = nn.Identity()
-            
-            # 3. Resize auxiliary classifiers to match num_classes
-            # First auxiliary classifier (aux1)
-            self.model.aux1.fc2 = nn.Linear(1024, self.num_classes)
-            # Second auxiliary classifier (aux2) 
-            self.model.aux2.fc2 = nn.Linear(1024, self.num_classes)
-            # Main classifier is already set correctly by num_classes parameter
+                self.model.pre_layers[0] = nn.Conv2d(1, 192, kernel_size=3, padding=1)
 
         # CIFAR ResNet models
         elif args.model.lower() == "resnet20":
@@ -389,7 +377,7 @@ class Model(pl.LightningModule):
             
             # Step decay: multiply by 0.1 every 60 epochs
             scheduler = optim.lr_scheduler.StepLR(
-                optimizer, step_size=60, gamma=0.1
+                optimizer, step_size=30, gamma=0.1
             )
             
             return {
@@ -436,12 +424,12 @@ class Model(pl.LightningModule):
         x, y = batch
         model_output = self.model(x)
 
-        # Handle GoogleNet auxiliary classifiers
-        if hasattr(model_output, 'logits'):  # GoogleNet with aux_logits=True
+        # Handle model outputs (custom GoogleNet returns simple tensor)
+        if hasattr(model_output, 'logits'):  # PyTorch GoogleNet with aux_logits=True (not used anymore)
             logits = model_output.logits
             aux_logits1 = getattr(model_output, 'aux_logits1', None)
             aux_logits2 = getattr(model_output, 'aux_logits2', None)
-        else:  # Regular models
+        else:  # Regular models including custom GoogleNet
             logits = model_output
             aux_logits1 = None
             aux_logits2 = None
@@ -449,7 +437,7 @@ class Model(pl.LightningModule):
         # 1) Classification loss
         cls_loss = self.cls_criterion(logits, y)
         
-        # Add auxiliary losses for GoogleNet if available
+        # Add auxiliary losses for PyTorch GoogleNet if available (not used with custom GoogleNet)
         if aux_logits1 is not None:
             cls_loss += 0.3 * self.cls_criterion(aux_logits1, y)
         if aux_logits2 is not None:
@@ -542,19 +530,19 @@ class Model(pl.LightningModule):
         x, y = batch
         model_output = self.model(x)
 
-        # Handle GoogleNet auxiliary classifiers
-        if hasattr(model_output, 'logits'):  # GoogleNet with aux_logits=True
+        # Handle model outputs (custom GoogleNet returns simple tensor)
+        if hasattr(model_output, 'logits'):  # PyTorch GoogleNet with aux_logits=True (not used anymore)
             logits = model_output.logits
             aux_logits1 = getattr(model_output, 'aux_logits1', None)
             aux_logits2 = getattr(model_output, 'aux_logits2', None)
-        else:  # Regular models
+        else:  # Regular models including custom GoogleNet
             logits = model_output
             aux_logits1 = None
             aux_logits2 = None
 
         cls_loss = self.cls_criterion(logits, y)
         
-        # Add auxiliary losses for GoogleNet if available
+        # Add auxiliary losses for PyTorch GoogleNet if available (not used with custom GoogleNet)
         if aux_logits1 is not None:
             cls_loss += 0.3 * self.cls_criterion(aux_logits1, y)
         if aux_logits2 is not None:
