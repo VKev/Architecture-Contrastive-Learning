@@ -455,37 +455,35 @@ class Model(pl.LightningModule):
         if aux_logits2 is not None:
             cls_loss += 0.3 * self.cls_criterion(aux_logits2, y)
 
-        # 2) Compute contrastive loss based on model type
+        # 2) Always compute contrastive loss for monitoring (but may not use it in final loss)
         contrastive_loss = torch.tensor(0.0, device=self.device)
         
         if self.hparams["model"].lower() == "simplemlp":
-            # Use contrastive linear loss for SimpleMLP
-            if self.hparams["contrastive_linear_loss"]:
-                neuron_list = get_neuron_list(self.model, select_layer_mode=self.hparams["select_layer_mode"])
-                if self.hparams["mode"].lower() == "random-sampling":
-                    neuron_list = select_random_neurons(neuron_list, k=self.hparams["num_kernels"])
-                elif self.hparams["mode"].lower() == "fixed-sampling":
-                    neuron_list = select_fixed_neurons(neuron_list, k=self.hparams["num_kernels"], seed=self.args.seed)
-                contrastive_loss = (
-                    self.linear_loss_fn(neuron_list)
-                    if neuron_list
-                    else torch.tensor(0.0, device=self.device)
-                )
+            # Always calculate contrastive linear loss for SimpleMLP
+            neuron_list = get_neuron_list(self.model, select_layer_mode=self.hparams["select_layer_mode"])
+            if self.hparams["mode"].lower() == "random-sampling":
+                neuron_list = select_random_neurons(neuron_list, k=self.hparams["num_kernels"])
+            elif self.hparams["mode"].lower() == "fixed-sampling":
+                neuron_list = select_fixed_neurons(neuron_list, k=self.hparams["num_kernels"], seed=self.args.seed)
+            contrastive_loss = (
+                self.linear_loss_fn(neuron_list)
+                if neuron_list
+                else torch.tensor(0.0, device=self.device)
+            )
         else:
-            # Use contrastive kernel loss for other models
-            if self.hparams["contrastive_kernel_loss"]:
-                kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"], select_layer_mode=self.hparams["select_layer_mode"])
-                if self.hparams["mode"].lower() == "random-sampling":
-                    kernel_list = select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
-                elif self.hparams["mode"].lower() == "fixed-sampling":
-                    kernel_list = select_fixed_kernels(kernel_list, k=self.hparams["num_kernels"], seed=self.args.seed)
-                contrastive_loss = (
-                    self.kernel_loss_fn(kernel_list)
-                    if kernel_list
-                    else torch.tensor(0.0, device=self.device)
-                )
+            # Always calculate contrastive kernel loss for other models
+            kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"], select_layer_mode=self.hparams["select_layer_mode"])
+            if self.hparams["mode"].lower() == "random-sampling":
+                kernel_list = select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
+            elif self.hparams["mode"].lower() == "fixed-sampling":
+                kernel_list = select_fixed_kernels(kernel_list, k=self.hparams["num_kernels"], seed=self.args.seed)
+            contrastive_loss = (
+                self.kernel_loss_fn(kernel_list)
+                if kernel_list
+                else torch.tensor(0.0, device=self.device)
+            )
 
-        # 3) Total loss
+        # 3) Total loss - only add contrastive loss if flag is enabled
         total_loss = cls_loss
         use_contrastive = (
             self.hparams["contrastive_linear_loss"] if self.hparams["model"].lower() == "simplemlp"
@@ -562,35 +560,33 @@ class Model(pl.LightningModule):
         if aux_logits2 is not None:
             cls_loss += 0.3 * self.cls_criterion(aux_logits2, y)
         
-        # Compute contrastive loss based on model type
+        # Always compute contrastive loss for monitoring (but may not use it in final loss)
         contrastive_loss = torch.tensor(0.0, device=self.device)
         
         if self.hparams["model"].lower() == "simplemlp":
-            # Use contrastive linear loss for SimpleMLP
-            if self.hparams["contrastive_linear_loss"]:
-                neuron_list = get_neuron_list(self.model, select_layer_mode=self.hparams["select_layer_mode"])
-                if self.hparams["mode"].lower() == "random-sampling":
-                    neuron_list = select_random_neurons(neuron_list, k=self.hparams["num_kernels"])
-                elif self.hparams["mode"].lower() == "fixed-sampling":
-                    neuron_list = select_fixed_neurons(neuron_list, k=self.hparams["num_kernels"], seed=self.args.seed)
-                contrastive_loss = (
-                    self.linear_loss_fn(neuron_list)
-                    if neuron_list
-                    else torch.tensor(0.0, device=self.device)
-                )
+            # Always calculate contrastive linear loss for SimpleMLP
+            neuron_list = get_neuron_list(self.model, select_layer_mode=self.hparams["select_layer_mode"])
+            if self.hparams["mode"].lower() == "random-sampling":
+                neuron_list = select_random_neurons(neuron_list, k=self.hparams["num_kernels"])
+            elif self.hparams["mode"].lower() == "fixed-sampling":
+                neuron_list = select_fixed_neurons(neuron_list, k=self.hparams["num_kernels"], seed=self.args.seed)
+            contrastive_loss = (
+                self.linear_loss_fn(neuron_list)
+                if neuron_list
+                else torch.tensor(0.0, device=self.device)
+            )
         else:
-            # Use contrastive kernel loss for other models
-            if self.hparams["contrastive_kernel_loss"]:
-                kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"], select_layer_mode=self.hparams["select_layer_mode"])
-                if self.hparams["mode"].lower() == "random-sampling":
-                    kernel_list = select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
-                elif self.hparams["mode"].lower() == "fixed-sampling":
-                    kernel_list = select_fixed_kernels(kernel_list, k=self.hparams["num_kernels"], seed=self.args.seed)
-                contrastive_loss = (
-                    self.kernel_loss_fn(kernel_list)
-                    if kernel_list
-                    else torch.tensor(0.0, device=self.device)
-                )
+            # Always calculate contrastive kernel loss for other models
+            kernel_list = get_kernel_list(self.model, channel_diversity=self.hparams["channel_diversity"], select_layer_mode=self.hparams["select_layer_mode"])
+            if self.hparams["mode"].lower() == "random-sampling":
+                kernel_list = select_random_kernels(kernel_list, k=self.hparams["num_kernels"])
+            elif self.hparams["mode"].lower() == "fixed-sampling":
+                kernel_list = select_fixed_kernels(kernel_list, k=self.hparams["num_kernels"], seed=self.args.seed)
+            contrastive_loss = (
+                self.kernel_loss_fn(kernel_list)
+                if kernel_list
+                else torch.tensor(0.0, device=self.device)
+            )
 
         # Total loss
         use_contrastive = (
