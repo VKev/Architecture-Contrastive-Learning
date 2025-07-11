@@ -421,10 +421,26 @@ class Model(pl.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x, y = batch
-        logits = self.model(x)
+        model_output = self.model(x)
+
+        # Handle GoogleNet auxiliary classifiers
+        if hasattr(model_output, 'logits'):  # GoogleNet with aux_logits=True
+            logits = model_output.logits
+            aux_logits1 = getattr(model_output, 'aux_logits1', None)
+            aux_logits2 = getattr(model_output, 'aux_logits2', None)
+        else:  # Regular models
+            logits = model_output
+            aux_logits1 = None
+            aux_logits2 = None
 
         # 1) Classification loss
         cls_loss = self.cls_criterion(logits, y)
+        
+        # Add auxiliary losses for GoogleNet if available
+        if aux_logits1 is not None:
+            cls_loss += 0.3 * self.cls_criterion(aux_logits1, y)
+        if aux_logits2 is not None:
+            cls_loss += 0.3 * self.cls_criterion(aux_logits2, y)
 
         # 2) Compute contrastive loss based on model type
         contrastive_loss = torch.tensor(0.0, device=self.device)
@@ -513,9 +529,25 @@ class Model(pl.LightningModule):
 
     def validation_step(self, batch, batch_idx, dataloader_idx: int = 0):
         x, y = batch
-        logits = self.model(x)
+        model_output = self.model(x)
+
+        # Handle GoogleNet auxiliary classifiers
+        if hasattr(model_output, 'logits'):  # GoogleNet with aux_logits=True
+            logits = model_output.logits
+            aux_logits1 = getattr(model_output, 'aux_logits1', None)
+            aux_logits2 = getattr(model_output, 'aux_logits2', None)
+        else:  # Regular models
+            logits = model_output
+            aux_logits1 = None
+            aux_logits2 = None
 
         cls_loss = self.cls_criterion(logits, y)
+        
+        # Add auxiliary losses for GoogleNet if available
+        if aux_logits1 is not None:
+            cls_loss += 0.3 * self.cls_criterion(aux_logits1, y)
+        if aux_logits2 is not None:
+            cls_loss += 0.3 * self.cls_criterion(aux_logits2, y)
         
         # Compute contrastive loss based on model type
         contrastive_loss = torch.tensor(0.0, device=self.device)
