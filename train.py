@@ -111,6 +111,12 @@ class DataModule(pl.LightningDataModule):
             self.test_dataset = datasets.CIFAR10(
                 root="./data", train=False, transform=transform_cifar10_test
             )
+            
+            # For GoogleNet with CIFAR10, use all training data (no validation split)
+            if self.args.model.lower() == "googlenet":
+                self.train_dataset = full_dataset
+                self.val_dataset = self.test_dataset  # Use test set for validation monitoring
+                return
 
         elif self.dataset == "cifar100":
             full_dataset = datasets.CIFAR100(
@@ -213,6 +219,11 @@ class DataModule(pl.LightningDataModule):
             batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers
         )
 
+        # For GoogleNet with CIFAR10, only return test loader (no separate validation)
+        if self.args.model.lower() == "googlenet" and self.dataset == "cifar10":
+            test_loader = DataLoader(self.test_dataset, **common_kwargs)
+            return test_loader
+        
         val_loader = DataLoader(self.val_dataset, **common_kwargs)
         test_loader = DataLoader(self.test_dataset, **common_kwargs)
         return [val_loader, test_loader]
@@ -377,7 +388,7 @@ class Model(pl.LightningModule):
             
             # Step decay: multiply by 0.1 every 60 epochs
             scheduler = optim.lr_scheduler.StepLR(
-                optimizer, step_size=30, gamma=0.1
+                optimizer, step_size=60, gamma=0.1
             )
             
             return {
@@ -588,7 +599,20 @@ class Model(pl.LightningModule):
         preds = torch.argmax(logits, dim=1)
         acc = (preds == y).float().mean()
         
-        if dataloader_idx == 0:  # Validation
+        # For GoogleNet with CIFAR10, only log as test (no separate validation)
+        if self.hparams["model"].lower() == "googlenet" and self.hparams["dataset"] == "cifar10":
+            self.log("test/loss", total_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False) 
+            self.log("test/acc", acc, on_step=False, on_epoch=True, prog_bar=True, add_dataloader_idx=False)
+            self.log("test/cls_loss", cls_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
+            
+            # Log appropriate contrastive loss
+            if self.hparams["model"].lower() == "simplemlp":
+                self.log("test/linear_loss", self.hparams["alpha"] * contrastive_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
+            else:
+                self.log("test/kernel_loss", self.hparams["alpha"] * contrastive_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
+            self.log("test_acc", acc, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)  # For checkpoint monitoring
+        
+        elif dataloader_idx == 0:  # Validation
             self.log("val/loss", total_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
             self.log("val/acc", acc, on_step=False, on_epoch=True, prog_bar=True, add_dataloader_idx=False)
             self.log("val/cls_loss", cls_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
@@ -712,9 +736,15 @@ def main():
     callbacks.append(checkpoint_callback)
 
     if args.early_stopping:
-        early_stopping = EarlyStopping(
-            monitor="val/acc", patience=args.patience, mode="max", verbose=True
-        )
+        # For GoogleNet with CIFAR10, monitor test accuracy instead of validation
+        if args.model.lower() == "googlenet" and args.dataset == "cifar10":
+            early_stopping = EarlyStopping(
+                monitor="test/acc", patience=args.patience, mode="max", verbose=True
+            )
+        else:
+            early_stopping = EarlyStopping(
+                monitor="val/acc", patience=args.patience, mode="max", verbose=True
+            )
         callbacks.append(early_stopping)
 
     logger = None
