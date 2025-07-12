@@ -386,9 +386,8 @@ class Model(pl.LightningModule):
                 weight_decay=self.args.weight_decay
             )
             
-            # Step decay: multiply by 0.1 every 60 epochs
             scheduler = optim.lr_scheduler.StepLR(
-                optimizer, step_size=60, gamma=0.1
+                optimizer, step_size=30, gamma=0.1
             )
             
             return {
