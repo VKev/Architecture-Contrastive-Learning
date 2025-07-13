@@ -387,7 +387,7 @@ class Model(pl.LightningModule):
             )
             
             scheduler = optim.lr_scheduler.StepLR(
-                optimizer, step_size=30, gamma=0.1
+                optimizer, step_size=50, gamma=0.1
             )
             
             return {
