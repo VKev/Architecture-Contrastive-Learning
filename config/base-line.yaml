@@ -2,3 +2,5 @@ batch_size: 100
 contrastive_kernel_loss: False
 num_epochs: 250
 lr: 0.1
+
+#python train.py --batch_size 128 --num_epochs 250 --lr 0.1 --weight_decay 0.0001 --contrastive_kernel_loss --dataset cifar10 --model resnet32 --wandb --margin 0.15 --num_kernels 0.1 --alpha 1 --mode random-sampling --channel_diversity

@@ -14,19 +14,141 @@ import numpy as np
 import pytorch_lightning as pl
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping
 from pytorch_lightning.loggers import WandbLogger
+try:
+    from torchmetrics import Accuracy
+except ImportError:
+    from pytorch_lightning.metrics import Accuracy
 import warnings
 import shutil
 import wandb
 import torch.nn.functional as F
-import wandb
-wandb.login(key="b8b74d6af92b4dea7706baeae8b86083dad5c941")
+import math
+from typing import List
+from torch.optim import Optimizer
+from torch.optim.lr_scheduler import _LRScheduler
 
 torch.set_float32_matmul_precision('high')
+
+# Import cifar10_models for VGG
+try:
+    from model.vgg import vgg11_bn, vgg13_bn, vgg16_bn, vgg19_bn
+    CIFAR10_MODELS_AVAILABLE = True
+except ImportError:
+    print("Warning: cifar10_models not available. VGG models will use default implementation.")
+    CIFAR10_MODELS_AVAILABLE = False
+
+class WarmupCosineLR(_LRScheduler):
+    """
+    Sets the learning rate of each parameter group to follow a linear warmup schedule
+    between warmup_start_lr and base_lr followed by a cosine annealing schedule between
+    base_lr and eta_min.
+    """
+
+    def __init__(
+        self,
+        optimizer: Optimizer,
+        warmup_epochs: int,
+        max_epochs: int,
+        warmup_start_lr: float = 1e-8,
+        eta_min: float = 1e-8,
+        last_epoch: int = -1,
+    ) -> None:
+
+        self.warmup_epochs = warmup_epochs
+        self.max_epochs = max_epochs
+        self.warmup_start_lr = warmup_start_lr
+        self.eta_min = eta_min
+
+        super(WarmupCosineLR, self).__init__(optimizer, last_epoch)
+
+    def get_lr(self) -> List[float]:
+        """
+        Compute learning rate using chainable form of the scheduler
+        """
+        if not self._get_lr_called_within_step:
+            warnings.warn(
+                "To get the last learning rate computed by the scheduler, "
+                "please use `get_last_lr()`.",
+                UserWarning,
+            )
+
+        if self.last_epoch == 0:
+            return [self.warmup_start_lr] * len(self.base_lrs)
+        elif self.last_epoch < self.warmup_epochs:
+            return [
+                group["lr"]
+                + (base_lr - self.warmup_start_lr) / (self.warmup_epochs - 1)
+                for base_lr, group in zip(self.base_lrs, self.optimizer.param_groups)
+            ]
+        elif self.last_epoch == self.warmup_epochs:
+            return self.base_lrs
+        elif (self.last_epoch - 1 - self.max_epochs) % (
+            2 * (self.max_epochs - self.warmup_epochs)
+        ) == 0:
+            return [
+                group["lr"]
+                + (base_lr - self.eta_min)
+                * (1 - math.cos(math.pi / (self.max_epochs - self.warmup_epochs)))
+                / 2
+                for base_lr, group in zip(self.base_lrs, self.optimizer.param_groups)
+            ]
+
+        return [
+            (
+                1
+                + math.cos(
+                    math.pi
+                    * (self.last_epoch - self.warmup_epochs)
+                    / (self.max_epochs - self.warmup_epochs)
+                )
+            )
+            / (
+                1
+                + math.cos(
+                    math.pi
+                    * (self.last_epoch - self.warmup_epochs - 1)
+                    / (self.max_epochs - self.warmup_epochs)
+                )
+            )
+            * (group["lr"] - self.eta_min)
+            + self.eta_min
+            for group in self.optimizer.param_groups
+        ]
+
+    def _get_closed_form_lr(self) -> List[float]:
+        """
+        Called when epoch is passed as a param to the `step` function of the scheduler.
+        """
+        if self.last_epoch < self.warmup_epochs:
+            return [
+                self.warmup_start_lr
+                + self.last_epoch
+                * (base_lr - self.warmup_start_lr)
+                / (self.warmup_epochs - 1)
+                for base_lr in self.base_lrs
+            ]
+
+        return [
+            self.eta_min
+            + 0.5
+            * (base_lr - self.eta_min)
+            * (
+                1
+                + math.cos(
+                    math.pi
+                    * (self.last_epoch - self.warmup_epochs)
+                    / (self.max_epochs - self.warmup_epochs)
+                )
+            )
+            for base_lr in self.base_lrs
+        ]
 
 from util import (
     transform_mnist,
     transform_cifar10_train,
     transform_cifar10_test,
+    transform_cifar10_resnet_train,
+    transform_cifar10_resnet_test,
     transform_mnist_224,
     ContrastiveKernelLoss,
     transform_imagenet_train,
@@ -65,7 +187,7 @@ class DataModule(pl.LightningDataModule):
         self.args = args
         self.batch_size = args.batch_size
         self.dataset = args.dataset
-        self.num_workers = min(16, os.cpu_count() // 2)
+        self.num_workers = 0  # Use 0 workers to avoid multiprocessing issues on Windows
 
     def prepare_data(self):
         if self.dataset == "mnist":
@@ -103,13 +225,26 @@ class DataModule(pl.LightningDataModule):
             self.test_dataset = datasets.MNIST(
                 root="./data", train=False, transform=test_transform
             )
+            
+            # For MNIST, use all training data (no validation split)
+            self.train_dataset = full_dataset
+            self.val_dataset = self.test_dataset  # Use test set for validation monitoring
+            return
 
         elif self.dataset == "cifar10":
+            # Choose transforms based on model type
+            if self.args.model.lower().startswith('resnet'):
+                train_transform = transform_cifar10_resnet_train
+                test_transform = transform_cifar10_resnet_test
+            else:  # Default for GoogleNet and other models
+                train_transform = transform_cifar10_train
+                test_transform = transform_cifar10_test
+                
             full_dataset = datasets.CIFAR10(
-                root="./data", train=True, transform=transform_cifar10_train
+                root="./data", train=True, transform=train_transform
             )
             self.test_dataset = datasets.CIFAR10(
-                root="./data", train=False, transform=transform_cifar10_test
+                root="./data", train=False, transform=test_transform
             )
             
             # For GoogleNet with CIFAR10, use all training data (no validation split)
@@ -119,16 +254,24 @@ class DataModule(pl.LightningDataModule):
                 return
 
         elif self.dataset == "cifar100":
+            # Choose transforms based on model type
+            if self.args.model.lower().startswith('resnet'):
+                train_transform = transform_cifar10_resnet_train
+                test_transform = transform_cifar10_resnet_test
+            else:  # Default for GoogleNet and other models
+                train_transform = transform_cifar10_train
+                test_transform = transform_cifar10_test
+                
             full_dataset = datasets.CIFAR100(
                 root="./data",
                 train=True,
-                transform=transform_cifar10_train,
+                transform=train_transform,
                 download=True,
             )
             self.test_dataset = datasets.CIFAR100(
                 root="./data",
                 train=False,
-                transform=transform_cifar10_test,
+                transform=test_transform,
                 download=True,
             )
 
@@ -219,8 +362,8 @@ class DataModule(pl.LightningDataModule):
             batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers
         )
 
-        # For GoogleNet with CIFAR10, only return test loader (no separate validation)
-        if self.args.model.lower() == "googlenet" and self.dataset == "cifar10":
+        # For GoogleNet with CIFAR10 or MNIST, only return test loader (no separate validation)
+        if (self.args.model.lower() == "googlenet" and self.dataset == "cifar10") or self.dataset == "mnist":
             test_loader = DataLoader(self.test_dataset, **common_kwargs)
             return test_loader
         
@@ -254,6 +397,13 @@ class Model(pl.LightningModule):
         elif args.dataset in ["breast_cancer"]:
             self.num_classes = 2
 
+        # Initialize accuracy metric for VGG models on CIFAR10
+        self.is_cifar10_vgg = (args.dataset == "cifar10" and 
+                              args.model.lower().startswith('vgg') and 
+                              CIFAR10_MODELS_AVAILABLE)
+        if self.is_cifar10_vgg:
+            self.accuracy = Accuracy(task="multiclass", num_classes=self.num_classes)
+
         if args.model.lower() == "simplemlp":
             if args.dataset == "iris":
                 self.model = SimpleMLP(input_size=4, hidden_sizes=[64,128,256,64], num_classes=3, dropout_rate=0.1)
@@ -265,13 +415,39 @@ class Model(pl.LightningModule):
         elif args.model.lower() == "resnet50":
             self.model = ResNet50(num_classes=self.num_classes, channels=channels)
 
-        elif args.model.lower() == "vgg16":
-            self.model = models.vgg16(weights=None)
-            if channels == 1:
-                self.model.features[0] = nn.Conv2d(
-                    1, 64, kernel_size=3, stride=1, padding=1
-                )
-            self.model.classifier[6] = nn.Linear(4096, self.num_classes)
+        elif args.model.lower() == "vgg16_bn":
+            if self.is_cifar10_vgg:
+                # Use custom CIFAR10-optimized VGG16
+                self.model = vgg16_bn()
+            else:
+                # Use default torchvision VGG16
+                self.model = models.vgg16(weights=None)
+                if channels == 1:
+                    self.model.features[0] = nn.Conv2d(
+                        1, 64, kernel_size=3, stride=1, padding=1
+                    )
+                self.model.classifier[6] = nn.Linear(4096, self.num_classes)
+
+        elif args.model.lower() == "vgg11_bn":
+            if self.is_cifar10_vgg:
+                # Use custom CIFAR10-optimized VGG11
+                self.model = vgg11_bn()
+            else:
+                raise ValueError(f"{args.model} is only supported for CIFAR10 with cifar10_models")
+
+        elif args.model.lower() == "vgg13_bn":
+            if self.is_cifar10_vgg:
+                # Use custom CIFAR10-optimized VGG13
+                self.model = vgg13_bn()
+            else:
+                raise ValueError(f"{args.model} is only supported for CIFAR10 with cifar10_models")
+
+        elif args.model.lower() == "vgg19_bn":
+            if self.is_cifar10_vgg:
+                # Use custom CIFAR10-optimized VGG19
+                self.model = vgg19_bn()
+            else:
+                raise ValueError(f"{args.model} is only supported for CIFAR10 with cifar10_models")
 
         elif args.model.lower() == "lenet5":
             if channels == 1:
@@ -374,7 +550,46 @@ class Model(pl.LightningModule):
         return self.model(x)
 
     def configure_optimizers(self):
-        if self.args.model.lower() in ["simplemlp"]:
+        if self.is_cifar10_vgg:
+            # Custom optimizer and scheduler for VGG on CIFAR10
+            optimizer = optim.SGD(
+                self.model.parameters(),
+                lr=self.args.lr,
+                weight_decay=getattr(self.args, 'weight_decay', 5e-4),
+                momentum=0.9,
+                nesterov=True,
+            )
+            
+            # Calculate total steps based on actual dataset size and batch size
+            if hasattr(self.trainer, 'datamodule') and self.trainer.datamodule is not None:
+                # If datamodule is available, calculate from train dataset
+                if hasattr(self.trainer.datamodule, 'train_dataset'):
+                    train_dataset_size = len(self.trainer.datamodule.train_dataset)
+                    steps_per_epoch = train_dataset_size // self.args.batch_size
+                    total_steps = self.args.num_epochs * steps_per_epoch
+                else:
+                    # Fallback: CIFAR10 has 50,000 training samples
+                    print("FALL BACK")
+                    steps_per_epoch = 50000 // self.args.batch_size
+                    total_steps = self.args.num_epochs * steps_per_epoch
+            else:
+                # Fallback: CIFAR10 has 50,000 training samples
+                print("FALL BACK")
+                steps_per_epoch = 50000 // self.args.batch_size
+                total_steps = self.args.num_epochs * steps_per_epoch
+            
+            scheduler = {
+                "scheduler": WarmupCosineLR(
+                    optimizer, 
+                    warmup_epochs=int(total_steps * 0.3), 
+                    max_epochs=total_steps
+                ),
+                "interval": "step",
+                "name": "learning_rate",
+            }
+            return [optimizer], [scheduler]
+            
+        elif self.args.model.lower() in ["simplemlp"]:
             optimizer = optim.Adam(
                 self.parameters(),
                 lr=self.args.lr,
@@ -506,8 +721,13 @@ class Model(pl.LightningModule):
             total_loss = total_loss + self.hparams["alpha"] * contrastive_loss
 
         # 4) Compute accuracy and log metrics
-        preds = torch.argmax(logits, dim=1)
-        acc = (preds == y).float().mean()
+        if self.is_cifar10_vgg:
+            # Use torchmetrics accuracy for VGG on CIFAR10 (returns 0-1 range)
+            acc = self.accuracy(logits, y)
+        else:
+            # Use manual calculation for other models
+            preds = torch.argmax(logits, dim=1)
+            acc = (preds == y).float().mean()
 
         self.log("train/loss", total_loss, on_step=True, on_epoch=True, prog_bar=False)
         self.log("train/acc", acc, on_step=True, on_epoch=True, prog_bar=True)
@@ -611,11 +831,17 @@ class Model(pl.LightningModule):
             self.hparams["alpha"] * contrastive_loss if use_contrastive else 0.0
         )
 
-        preds = torch.argmax(logits, dim=1)
-        acc = (preds == y).float().mean()
+        # Compute accuracy
+        if self.is_cifar10_vgg:
+            # Use torchmetrics accuracy for VGG on CIFAR10 (returns 0-1 range)
+            acc = self.accuracy(logits, y)
+        else:
+            # Use manual calculation for other models
+            preds = torch.argmax(logits, dim=1)
+            acc = (preds == y).float().mean()
         
-        # For GoogleNet with CIFAR10, only log as test (no separate validation)
-        if self.hparams["model"].lower() == "googlenet" and self.hparams["dataset"] == "cifar10":
+        # For GoogleNet with CIFAR10 or MNIST, only log as test (no separate validation)
+        if (self.hparams["model"].lower() == "googlenet" and self.hparams["dataset"] == "cifar10") or self.hparams["dataset"] == "mnist":
             self.log("test/loss", total_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False) 
             self.log("test/acc", acc, on_step=False, on_epoch=True, prog_bar=True, add_dataloader_idx=False)
             self.log("test/cls_loss", cls_loss, on_step=False, on_epoch=True, prog_bar=False, add_dataloader_idx=False)
@@ -666,7 +892,7 @@ def parse_args():
     parser.add_argument("--batch_size", type=int, default=32, help="Batch size")
     parser.add_argument("--margin", type=float, default=0.2, help="Margin for contrastive loss")
     parser.add_argument("--num_kernels", type=float, default=128, help="Number of kernels for contrastive loss (int for exact count, float <1 for percentage)")
-    parser.add_argument("--model", type=str, default="resnet50", help="Model architecture (resnet50, vgg16, lenet5, googlenet, resnet20, resnet32, resnet44, resnet56, resnet110, resnet1202, simplemlp)")
+    parser.add_argument("--model", type=str, default="resnet50", help="Model architecture (resnet50, vgg16, vgg11_bn, vgg13_bn, vgg19_bn, lenet5, googlenet, resnet20, resnet32, resnet44, resnet56, resnet110, resnet1202, simplemlp)")
     parser.add_argument("--mode", type=str, default="full-layer", help="Kernel selection mode: full-layer, random-sampling, or fixed-sampling")
     parser.add_argument("--dataset", choices=["mnist", "cifar10", "cifar100", "iris", "breast_cancer"], default="mnist", help="Dataset to use")
     parser.add_argument("--save_every", type=int, default=10, help="Save checkpoint every n epochs")
@@ -706,6 +932,10 @@ def main():
     
     # Set seed for reproducibility
     set_seed(args.seed)
+    
+    # Login to wandb only if it's being used
+    if args.wandb:
+        wandb.login(key="b8b74d6af92b4dea7706baeae8b86083dad5c941")
 
     if args.resume:
         checkpoint = torch.load(args.resume, map_location="cpu")
@@ -752,8 +982,8 @@ def main():
     callbacks.append(checkpoint_callback)
 
     if args.early_stopping:
-        # For GoogleNet with CIFAR10, monitor test accuracy instead of validation
-        if args.model.lower() == "googlenet" and args.dataset == "cifar10":
+        # For GoogleNet with CIFAR10 or MNIST, monitor test accuracy instead of validation
+        if (args.model.lower() == "googlenet" and args.dataset == "cifar10") or args.dataset == "mnist":
             early_stopping = EarlyStopping(
                 monitor="test/acc", patience=args.patience, mode="max", verbose=True
             )

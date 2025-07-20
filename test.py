@@ -19,10 +19,12 @@ def parse_args():
     parser.add_argument("--dataset", choices=["mnist", "cifar10"], default="mnist", help="Dataset to use")
     parser.add_argument("--save_every", type=int, default=10, help="Save checkpoint every n epochs")
     parser.add_argument("--contrastive_kernel_loss", action="store_true", help="Use contrastive kernel loss")
+    parser.add_argument("--contrastive_linear_loss", action="store_true", help="Use contrastive kernel loss")
     parser.add_argument("--wandb", action="store_true", help="Use WandB logging")
     parser.add_argument("--early_stopping", action="store_true", help="Enable early stopping")
     parser.add_argument("--patience", type=int, default=10, help="Patience for early stopping")
     parser.add_argument("--channel_diversity", action="store_true", help="Use channel diversity mode for kernel extraction and loss calculation")
+    parser.add_argument("--calculate_contrastive_loss", action="store_true", help="Use channel diversity mode for kernel extraction and loss calculation")
     parser.add_argument("--select_layer_mode", type=str, default="default", choices=["default", "filter"], help="Layer selection mode: 'default' uses all Conv2d layers, 'filter' uses alternating pattern (take, ignore, take, ignore...)")
     parser.add_argument("--num_kernels", type=float, default=128, help="Number of kernels for contrastive loss (int for exact count, float <1 for percentage)")
 
