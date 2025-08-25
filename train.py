@@ -641,8 +641,15 @@ class Model(pl.LightningModule):
                 self.parameters(), lr=self.args.lr, momentum=0.9, weight_decay=self.args.weight_decay
             )
 
+            # Use canonical milestones for CIFAR settings
+            if self.args.dataset == "cifar100":
+                milestones = [80, 120]
+            else:
+                # default keeps previous behavior (roughly 156 epochs schedule)
+                milestones = [125, 125 + 31]
+
             scheduler = optim.lr_scheduler.MultiStepLR(
-                optimizer, milestones=[125, 125+31], gamma=0.1
+                optimizer, milestones=milestones, gamma=0.1
             )
 
             return {
@@ -949,6 +956,17 @@ def main():
         checkpoint = None
     else:
         args.wandb_id = wandb.util.generate_id()
+
+    # Enforce canonical CIFAR-100 training settings for CIFAR-ResNet models when starting fresh
+    # 160 epochs, lr=0.1 with decays at epochs 80 & 120, batch size 128, weight decay 1e-4
+    if not args.resume and args.dataset == "cifar100" and args.model.lower() in [
+        "resnet20", "resnet32", "resnet44", "resnet56", "resnet110"
+    ]:
+        print("Applying CIFAR-100 defaults: epochs=160, lr=0.1, milestones=[80,120], batch_size=128, weight_decay=1e-4")
+        args.lr = 0.1
+        args.weight_decay = 1e-4
+        args.num_epochs = 160
+        args.batch_size = 128
 
     model = build_model(args)
     dm = DataModule(args)
