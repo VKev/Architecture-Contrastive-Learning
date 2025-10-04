@@ -397,11 +397,13 @@ class Model(pl.LightningModule):
         elif args.dataset in ["breast_cancer"]:
             self.num_classes = 2
 
-        # Initialize accuracy metric for VGG models on CIFAR10
-        self.is_cifar10_vgg = (args.dataset == "cifar10" and 
-                              args.model.lower().startswith('vgg') and 
-                              CIFAR10_MODELS_AVAILABLE)
-        if self.is_cifar10_vgg:
+        # Initialize accuracy metric for CIFAR VGG models
+        self.using_cifar_vgg = (
+            args.model.lower().startswith("vgg")
+            and args.dataset in ["cifar10", "cifar100"]
+            and CIFAR10_MODELS_AVAILABLE
+        )
+        if self.using_cifar_vgg:
             self.accuracy = Accuracy(task="multiclass", num_classes=self.num_classes)
 
         if args.model.lower() == "simplemlp":
@@ -416,12 +418,12 @@ class Model(pl.LightningModule):
             self.model = ResNet50(num_classes=self.num_classes, channels=channels)
 
         elif args.model.lower() == "vgg16_bn":
-            if self.is_cifar10_vgg:
-                # Use custom CIFAR10-optimized VGG16
-                self.model = vgg16_bn()
+            if self.using_cifar_vgg:
+                # Use custom CIFAR-optimized VGG16 and match class count
+                self.model = vgg16_bn(num_classes=self.num_classes)
             else:
-                # Use default torchvision VGG16
-                self.model = models.vgg16(weights=None)
+                # Use default torchvision VGG16 with batch normalization
+                self.model = models.vgg16_bn(weights=None)
                 if channels == 1:
                     self.model.features[0] = nn.Conv2d(
                         1, 64, kernel_size=3, stride=1, padding=1
@@ -429,25 +431,25 @@ class Model(pl.LightningModule):
                 self.model.classifier[6] = nn.Linear(4096, self.num_classes)
 
         elif args.model.lower() == "vgg11_bn":
-            if self.is_cifar10_vgg:
-                # Use custom CIFAR10-optimized VGG11
-                self.model = vgg11_bn()
+            if self.using_cifar_vgg:
+                # Use custom CIFAR-optimized VGG11
+                self.model = vgg11_bn(num_classes=self.num_classes)
             else:
-                raise ValueError(f"{args.model} is only supported for CIFAR10 with cifar10_models")
+                raise ValueError(f"{args.model} requires the CIFAR VGG definitions; install them or use torchvision VGG instead")
 
         elif args.model.lower() == "vgg13_bn":
-            if self.is_cifar10_vgg:
-                # Use custom CIFAR10-optimized VGG13
-                self.model = vgg13_bn()
+            if self.using_cifar_vgg:
+                # Use custom CIFAR-optimized VGG13
+                self.model = vgg13_bn(num_classes=self.num_classes)
             else:
-                raise ValueError(f"{args.model} is only supported for CIFAR10 with cifar10_models")
+                raise ValueError(f"{args.model} requires the CIFAR VGG definitions; install them or use torchvision VGG instead")
 
         elif args.model.lower() == "vgg19_bn":
-            if self.is_cifar10_vgg:
-                # Use custom CIFAR10-optimized VGG19
-                self.model = vgg19_bn()
+            if self.using_cifar_vgg:
+                # Use custom CIFAR-optimized VGG19
+                self.model = vgg19_bn(num_classes=self.num_classes)
             else:
-                raise ValueError(f"{args.model} is only supported for CIFAR10 with cifar10_models")
+                raise ValueError(f"{args.model} requires the CIFAR VGG definitions; install them or use torchvision VGG instead")
 
         elif args.model.lower() == "lenet5":
             if channels == 1:
@@ -550,8 +552,8 @@ class Model(pl.LightningModule):
         return self.model(x)
 
     def configure_optimizers(self):
-        if self.is_cifar10_vgg:
-            # Custom optimizer and scheduler for VGG on CIFAR10
+        if self.using_cifar_vgg:
+            # Custom optimizer and scheduler for CIFAR VGG models
             optimizer = optim.SGD(
                 self.model.parameters(),
                 lr=self.args.lr,
@@ -721,7 +723,7 @@ class Model(pl.LightningModule):
             total_loss = total_loss + self.hparams["alpha"] * contrastive_loss
 
         # 4) Compute accuracy and log metrics
-        if self.is_cifar10_vgg:
+        if self.using_cifar_vgg:
             # Use torchmetrics accuracy for VGG on CIFAR10 (returns 0-1 range)
             acc = self.accuracy(logits, y)
         else:
@@ -832,7 +834,7 @@ class Model(pl.LightningModule):
         )
 
         # Compute accuracy
-        if self.is_cifar10_vgg:
+        if self.using_cifar_vgg:
             # Use torchmetrics accuracy for VGG on CIFAR10 (returns 0-1 range)
             acc = self.accuracy(logits, y)
         else:
