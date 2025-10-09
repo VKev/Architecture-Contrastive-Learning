@@ -20,7 +20,7 @@ cfg = {
 
 class VGG(nn.Module):
 
-    def __init__(self, features, num_class=100):
+    def __init__(self, features, num_classes=100):
         super().__init__()
         self.features = features
 
@@ -31,7 +31,7 @@ class VGG(nn.Module):
             nn.Linear(4096, 4096),
             nn.ReLU(inplace=True),
             nn.Dropout(),
-            nn.Linear(4096, num_class)
+            nn.Linear(4096, num_classes)
         )
 
     def forward(self, x):
@@ -60,15 +60,15 @@ def make_layers(cfg, batch_norm=False):
 
     return nn.Sequential(*layers)
 
-def vgg11_bn():
-    return VGG(make_layers(cfg['A'], batch_norm=True))
+def vgg11_bn(num_classes=100):
+    return VGG(make_layers(cfg['A'], batch_norm=True), num_classes=num_classes)
 
-def vgg13_bn():
-    return VGG(make_layers(cfg['B'], batch_norm=True))
+def vgg13_bn(num_classes=100):
+    return VGG(make_layers(cfg['B'], batch_norm=True), num_classes=num_classes)
 
-def vgg16_bn():
-    return VGG(make_layers(cfg['D'], batch_norm=True))
+def vgg16_bn(num_classes=100):
+    return VGG(make_layers(cfg['D'], batch_norm=True), num_classes=num_classes)
 
-def vgg19_bn():
-    return VGG(make_layers(cfg['E'], batch_norm=True))
+def vgg19_bn(num_classes=100):
+    return VGG(make_layers(cfg['E'], batch_norm=True), num_classes=num_classes)
 
