@@ -280,6 +280,62 @@ class DataModule(pl.LightningDataModule):
             self.val_dataset = self.test_dataset  # Use test set for validation monitoring
             return
 
+        elif self.dataset == "fashion_mnist":
+            if is_cifar_resnet:
+                train_transform = transform_fashionmnist_resnet_train
+                test_transform = transform_fashionmnist_resnet_test
+            else:
+                train_transform = transform_fashionmnist_train
+                test_transform = transform_fashionmnist_test
+
+            full_dataset = datasets.FashionMNIST(
+                root="./data", train=True, transform=train_transform
+            )
+            self.test_dataset = datasets.FashionMNIST(
+                root="./data", train=False, transform=test_transform
+            )
+
+        elif self.dataset == "kmnist":
+            if is_cifar_resnet:
+                train_transform = transform_kmnist_resnet_train
+                test_transform = transform_kmnist_resnet_test
+            else:
+                train_transform = transform_kmnist_train
+                test_transform = transform_kmnist_test
+
+            full_dataset = datasets.KMNIST(
+                root="./data", train=True, transform=train_transform
+            )
+            self.test_dataset = datasets.KMNIST(
+                root="./data", train=False, transform=test_transform
+            )
+
+        elif self.dataset == "emnist_balanced":
+            if is_cifar_resnet:
+                train_transform = transform_emnist_balanced_resnet_train
+                test_transform = transform_emnist_balanced_resnet_test
+            else:
+                train_transform = transform_emnist_balanced_train
+                test_transform = transform_emnist_balanced_test
+
+            full_dataset = datasets.EMNIST(
+                root="./data", split="balanced", train=True, transform=train_transform
+            )
+            self.test_dataset = datasets.EMNIST(
+                root="./data", split="balanced", train=False, transform=test_transform
+            )
+
+        elif self.dataset == "svhn":
+            train_transform = transform_svhn_train
+            test_transform = transform_svhn_test
+
+            full_dataset = datasets.SVHN(
+                root="./data", split="train", transform=train_transform
+            )
+            self.test_dataset = datasets.SVHN(
+                root="./data", split="test", transform=test_transform
+            )
+
         elif self.dataset == "cifar10":
             # Choose transforms based on model type
             if self.args.model.lower().startswith('resnet'):
