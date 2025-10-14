@@ -216,68 +216,10 @@ class DataModule(pl.LightningDataModule):
         self.num_workers = 0  # Use 0 workers to avoid multiprocessing issues on Windows
 
     def prepare_data(self):
+        """Download datasets that require it."""
         if self.dataset == "mnist":
             datasets.MNIST(root="./data", train=True, download=True)
             datasets.MNIST(root="./data", train=False, download=True)
-        elif self.dataset == "fashion_mnist":
-            if is_cifar_resnet:
-                train_transform = transform_fashionmnist_resnet_train
-                test_transform = transform_fashionmnist_resnet_test
-            else:
-                train_transform = transform_fashionmnist_train
-                test_transform = transform_fashionmnist_test
-
-            full_dataset = datasets.FashionMNIST(
-                root="./data", train=True, transform=train_transform
-            )
-            self.test_dataset = datasets.FashionMNIST(
-                root="./data", train=False, transform=test_transform
-            )
-
-        elif self.dataset == "kmnist":
-            if is_cifar_resnet:
-                train_transform = transform_kmnist_resnet_train
-                test_transform = transform_kmnist_resnet_test
-            else:
-                train_transform = transform_kmnist_train
-                test_transform = transform_kmnist_test
-
-            full_dataset = datasets.KMNIST(
-                root="./data", train=True, transform=train_transform
-            )
-            self.test_dataset = datasets.KMNIST(
-                root="./data", train=False, transform=test_transform
-            )
-
-        elif self.dataset == "emnist_balanced":
-            if is_cifar_resnet:
-                train_transform = transform_emnist_balanced_resnet_train
-                test_transform = transform_emnist_balanced_resnet_test
-            else:
-                train_transform = transform_emnist_balanced_train
-                test_transform = transform_emnist_balanced_test
-
-            full_dataset = datasets.EMNIST(
-                root="./data", split="balanced", train=True, transform=train_transform
-            )
-            self.test_dataset = datasets.EMNIST(
-                root="./data", split="balanced", train=False, transform=test_transform
-            )
-
-        elif self.dataset == "svhn":
-            train_transform = transform_svhn_train
-            test_transform = transform_svhn_test
-
-            full_dataset = datasets.SVHN(
-                root="./data", split="train", transform=train_transform
-            )
-            self.test_dataset = datasets.SVHN(
-                root="./data", split="test", transform=test_transform
-            )
-
-        elif self.dataset == "cifar10":
-            datasets.CIFAR10(root="./data", train=True, download=True)
-            datasets.CIFAR10(root="./data", train=False, download=True)
         elif self.dataset == "fashion_mnist":
             datasets.FashionMNIST(root="./data", train=True, download=True)
             datasets.FashionMNIST(root="./data", train=False, download=True)
@@ -287,14 +229,17 @@ class DataModule(pl.LightningDataModule):
         elif self.dataset == "emnist_balanced":
             datasets.EMNIST(root="./data", split="balanced", train=True, download=True)
             datasets.EMNIST(root="./data", split="balanced", train=False, download=True)
+        elif self.dataset == "cifar10":
+            datasets.CIFAR10(root="./data", train=True, download=True)
+            datasets.CIFAR10(root="./data", train=False, download=True)
+        elif self.dataset == "cifar100":
+            datasets.CIFAR100(root="./data", train=True, download=True)
+            datasets.CIFAR100(root="./data", train=False, download=True)
         elif self.dataset == "svhn":
             datasets.SVHN(root="./data", split="train", download=True)
             datasets.SVHN(root="./data", split="test", download=True)
-        elif self.dataset == "iris":
-            # Iris dataset is loaded from sklearn, no download needed
-            pass
-        elif self.dataset == "breast_cancer":
-            # Breast cancer dataset is loaded from sklearn, no download needed
+        elif self.dataset in ["iris", "breast_cancer", "imagenet1k"]:
+            # These datasets are handled elsewhere or do not require downloads here
             pass
 
     def setup(self, stage=None):
