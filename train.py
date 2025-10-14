@@ -145,11 +145,27 @@ class WarmupCosineLR(_LRScheduler):
 
 from util import (
     transform_mnist,
+    transform_mnist_resnet_train,
+    transform_mnist_resnet_test,
     transform_cifar10_train,
     transform_cifar10_test,
     transform_cifar10_resnet_train,
     transform_cifar10_resnet_test,
     transform_mnist_224,
+    transform_fashionmnist_train,
+    transform_fashionmnist_test,
+    transform_fashionmnist_resnet_train,
+    transform_fashionmnist_resnet_test,
+    transform_kmnist_train,
+    transform_kmnist_test,
+    transform_kmnist_resnet_train,
+    transform_kmnist_resnet_test,
+    transform_emnist_balanced_train,
+    transform_emnist_balanced_test,
+    transform_emnist_balanced_resnet_train,
+    transform_emnist_balanced_resnet_test,
+    transform_svhn_train,
+    transform_svhn_test,
     ContrastiveKernelLoss,
     transform_imagenet_train,
     transform_imagenet_val,
@@ -181,6 +197,16 @@ def set_seed(seed):
     pl.seed_everything(seed, workers=True)
 
 
+def _dataset_targets_array(dataset) -> np.ndarray:
+    for attr in ("targets", "labels"):
+        if hasattr(dataset, attr):
+            data = getattr(dataset, attr)
+            if isinstance(data, torch.Tensor):
+                data = data.numpy()
+            return np.array(data)
+    raise AttributeError("Dataset does not expose 'targets' or 'labels'.")
+
+
 class DataModule(pl.LightningDataModule):
     def __init__(self, args):
         super().__init__()
@@ -193,9 +219,77 @@ class DataModule(pl.LightningDataModule):
         if self.dataset == "mnist":
             datasets.MNIST(root="./data", train=True, download=True)
             datasets.MNIST(root="./data", train=False, download=True)
+        elif self.dataset == "fashion_mnist":
+            if is_cifar_resnet:
+                train_transform = transform_fashionmnist_resnet_train
+                test_transform = transform_fashionmnist_resnet_test
+            else:
+                train_transform = transform_fashionmnist_train
+                test_transform = transform_fashionmnist_test
+
+            full_dataset = datasets.FashionMNIST(
+                root="./data", train=True, transform=train_transform
+            )
+            self.test_dataset = datasets.FashionMNIST(
+                root="./data", train=False, transform=test_transform
+            )
+
+        elif self.dataset == "kmnist":
+            if is_cifar_resnet:
+                train_transform = transform_kmnist_resnet_train
+                test_transform = transform_kmnist_resnet_test
+            else:
+                train_transform = transform_kmnist_train
+                test_transform = transform_kmnist_test
+
+            full_dataset = datasets.KMNIST(
+                root="./data", train=True, transform=train_transform
+            )
+            self.test_dataset = datasets.KMNIST(
+                root="./data", train=False, transform=test_transform
+            )
+
+        elif self.dataset == "emnist_balanced":
+            if is_cifar_resnet:
+                train_transform = transform_emnist_balanced_resnet_train
+                test_transform = transform_emnist_balanced_resnet_test
+            else:
+                train_transform = transform_emnist_balanced_train
+                test_transform = transform_emnist_balanced_test
+
+            full_dataset = datasets.EMNIST(
+                root="./data", split="balanced", train=True, transform=train_transform
+            )
+            self.test_dataset = datasets.EMNIST(
+                root="./data", split="balanced", train=False, transform=test_transform
+            )
+
+        elif self.dataset == "svhn":
+            train_transform = transform_svhn_train
+            test_transform = transform_svhn_test
+
+            full_dataset = datasets.SVHN(
+                root="./data", split="train", transform=train_transform
+            )
+            self.test_dataset = datasets.SVHN(
+                root="./data", split="test", transform=test_transform
+            )
+
         elif self.dataset == "cifar10":
             datasets.CIFAR10(root="./data", train=True, download=True)
             datasets.CIFAR10(root="./data", train=False, download=True)
+        elif self.dataset == "fashion_mnist":
+            datasets.FashionMNIST(root="./data", train=True, download=True)
+            datasets.FashionMNIST(root="./data", train=False, download=True)
+        elif self.dataset == "kmnist":
+            datasets.KMNIST(root="./data", train=True, download=True)
+            datasets.KMNIST(root="./data", train=False, download=True)
+        elif self.dataset == "emnist_balanced":
+            datasets.EMNIST(root="./data", split="balanced", train=True, download=True)
+            datasets.EMNIST(root="./data", split="balanced", train=False, download=True)
+        elif self.dataset == "svhn":
+            datasets.SVHN(root="./data", split="train", download=True)
+            datasets.SVHN(root="./data", split="test", download=True)
         elif self.dataset == "iris":
             # Iris dataset is loaded from sklearn, no download needed
             pass
@@ -205,18 +299,28 @@ class DataModule(pl.LightningDataModule):
 
     def setup(self, stage=None):
         split = 0.9
+        model_name = self.args.model.lower()
+        cifar_resnet_models = {"resnet20", "resnet32", "resnet44", "resnet56", "resnet110", "resnet1202"}
+        is_cifar_resnet = model_name in cifar_resnet_models
+
         if self.dataset == "mnist":
             train_transform = (
-                transform_mnist_224
-                if self.args.model.lower()
-                in [ "resnet50", "vgg16", "googlenet"]
-                else transform_mnist
+                transform_mnist_resnet_train
+                if is_cifar_resnet
+                else (
+                    transform_mnist_224
+                    if model_name in ["resnet50", "vgg16", "googlenet"]
+                    else transform_mnist
+                )
             )
             test_transform = (
-                transform_mnist_224
-                if self.args.model.lower()
-                in [ "resnet50", "vgg16", "googlenet"]
-                else transform_mnist
+                transform_mnist_resnet_test
+                if is_cifar_resnet
+                else (
+                    transform_mnist_224
+                    if model_name in ["resnet50", "vgg16", "googlenet"]
+                    else transform_mnist
+                )
             )
 
             full_dataset = datasets.MNIST(
@@ -338,7 +442,7 @@ class DataModule(pl.LightningDataModule):
             return  # Skip the general dataset splitting logic below
 
         if self.dataset not in ["iris", "breast_cancer"]:
-            labels = np.array(full_dataset.targets)
+            labels = _dataset_targets_array(full_dataset)
             train_idx, val_idx = train_test_split(
                 np.arange(len(full_dataset)),
                 test_size=1.0 - split,
@@ -386,12 +490,25 @@ class Model(pl.LightningModule):
         self.save_hyperparameters(vars(args))
         self.args = args
 
-        channels = 3 if args.dataset in ["cifar10", "cifar100", "imagenet1k"] else 1
+        color_datasets = {"cifar10", "cifar100", "imagenet1k", "svhn"}
+        channels = 3 if args.dataset in color_datasets else 1
+        resnet_supported_datasets = {
+            "cifar10",
+            "cifar100",
+            "mnist",
+            "fashion_mnist",
+            "kmnist",
+            "emnist_balanced",
+            "svhn",
+        }
+        resnet_supported_str = ", ".join(sorted(resnet_supported_datasets))
         self.num_classes = 10
         if args.dataset in ["imagenet1k"]:
             self.num_classes = 1000
         elif args.dataset in ["cifar100"]:
             self.num_classes = 100
+        elif args.dataset in ["emnist_balanced"]:
+            self.num_classes = 47
         elif args.dataset in ["iris"]:
             self.num_classes = 3
         elif args.dataset in ["breast_cancer"]:
@@ -473,52 +590,52 @@ class Model(pl.LightningModule):
 
         # CIFAR ResNet models
         elif args.model.lower() == "resnet20":
-            if args.dataset in ["cifar10", "cifar100"]:
+            if args.dataset in resnet_supported_datasets:
                 self.model = resnet20()
                 if self.num_classes != 10:  # Adjust for CIFAR100
                     self.model.linear = nn.Linear(64, self.num_classes)
             else:
-                raise ValueError(f"{args.model} is designed for CIFAR datasets")
+                raise ValueError(f"{args.model} supports datasets: {resnet_supported_str}")
 
         elif args.model.lower() == "resnet32":
-            if args.dataset in ["cifar10", "cifar100"]:
+            if args.dataset in resnet_supported_datasets:
                 self.model = resnet32()
                 if self.num_classes != 10:  # Adjust for CIFAR100
                     self.model.linear = nn.Linear(64, self.num_classes)
             else:
-                raise ValueError(f"{args.model} is designed for CIFAR datasets")
+                raise ValueError(f"{args.model} supports datasets: {resnet_supported_str}")
 
         elif args.model.lower() == "resnet44":
-            if args.dataset in ["cifar10", "cifar100"]:
+            if args.dataset in resnet_supported_datasets:
                 self.model = resnet44()
                 if self.num_classes != 10:  # Adjust for CIFAR100
                     self.model.linear = nn.Linear(64, self.num_classes)
             else:
-                raise ValueError(f"{args.model} is designed for CIFAR datasets")
+                raise ValueError(f"{args.model} supports datasets: {resnet_supported_str}")
 
         elif args.model.lower() == "resnet56":
-            if args.dataset in ["cifar10", "cifar100"]:
+            if args.dataset in resnet_supported_datasets:
                 self.model = resnet56()
                 if self.num_classes != 10:  # Adjust for CIFAR100
                     self.model.linear = nn.Linear(64, self.num_classes)
             else:
-                raise ValueError(f"{args.model} is designed for CIFAR datasets")
+                raise ValueError(f"{args.model} supports datasets: {resnet_supported_str}")
 
         elif args.model.lower() == "resnet110":
-            if args.dataset in ["cifar10", "cifar100"]:
+            if args.dataset in resnet_supported_datasets:
                 self.model = resnet110()
                 if self.num_classes != 10:  # Adjust for CIFAR100
                     self.model.linear = nn.Linear(64, self.num_classes)
             else:
-                raise ValueError(f"{args.model} is designed for CIFAR datasets")
+                raise ValueError(f"{args.model} supports datasets: {resnet_supported_str}")
 
         elif args.model.lower() == "resnet1202":
-            if args.dataset in ["cifar10", "cifar100"]:
+            if args.dataset in resnet_supported_datasets:
                 self.model = resnet1202()
                 if self.num_classes != 10:  # Adjust for CIFAR100
                     self.model.linear = nn.Linear(64, self.num_classes)
             else:
-                raise ValueError(f"{args.model} is designed for CIFAR datasets")
+                raise ValueError(f"{args.model} supports datasets: {resnet_supported_str}")
 
         else:
             raise ValueError(f"Unsupported model: {args.model}")
@@ -896,7 +1013,23 @@ def parse_args():
     parser.add_argument("--num_kernels", type=float, default=128, help="Number of kernels for contrastive loss (int for exact count, float <1 for percentage)")
     parser.add_argument("--model", type=str, default="resnet50", help="Model architecture (resnet50, vgg16, vgg11_bn, vgg13_bn, vgg19_bn, lenet5, googlenet, resnet20, resnet32, resnet44, resnet56, resnet110, resnet1202, simplemlp)")
     parser.add_argument("--mode", type=str, default="full-layer", help="Kernel selection mode: full-layer, random-sampling, or fixed-sampling")
-    parser.add_argument("--dataset", choices=["mnist", "cifar10", "cifar100", "iris", "breast_cancer"], default="mnist", help="Dataset to use")
+    parser.add_argument(
+        "--dataset",
+        choices=[
+            "mnist",
+            "fashion_mnist",
+            "kmnist",
+            "emnist_balanced",
+            "cifar10",
+            "cifar100",
+            "svhn",
+            "imagenet1k",
+            "iris",
+            "breast_cancer",
+        ],
+        default="mnist",
+        help="Dataset to use",
+    )
     parser.add_argument("--save_every", type=int, default=10, help="Save checkpoint every n epochs")
     parser.add_argument("--contrastive_kernel_loss", action="store_true", help="Use contrastive kernel loss")
     parser.add_argument("--contrastive_linear_loss", action="store_true", help="Use contrastive linear loss (only for SimpleMLP)")
